@@ -11,6 +11,11 @@ const cleanXmlText = (value: string) =>
     .replaceAll(/\s+/g, " ")
     .trim();
 
+const matchesForTag = (entry: string, tag: string) =>
+  Array.from(entry.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "g"))).map(
+    (match) => match[1] ?? "",
+  );
+
 export async function gatherArxivDocuments(args: {
   maxDocs: number;
   searchTerms: string[];
@@ -44,11 +49,32 @@ export async function gatherArxivDocuments(args: {
       }
 
       const published = entry.match(/<published>([\s\S]*?)<\/published>/)?.[1]?.trim();
+      const updated = entry.match(/<updated>([\s\S]*?)<\/updated>/)?.[1]?.trim();
+      const authors = matchesForTag(entry, "name").map((name) => cleanXmlText(name)).filter(Boolean);
+      const categories = Array.from(
+        entry.matchAll(/<category[^>]*term="([^"]+)"[^>]*\/?>/g),
+      )
+        .map((match) => cleanXmlText(match[1] ?? ""))
+        .filter(Boolean);
+      const pdfUrl =
+        entry
+          .match(/<link[^>]*title="pdf"[^>]*href="([^"]+)"[^>]*\/?>/)?.[1]
+          ?.replace("http://", "https://") ??
+        entry
+          .match(/<link[^>]*type="application\/pdf"[^>]*href="([^"]+)"[^>]*\/?>/)?.[1]
+          ?.replace("http://", "https://");
       const url = id.replace("http://", "https://");
 
       if (!docsByUrl.has(url)) {
         docsByUrl.set(url, {
-          metadata: { published },
+          metadata: {
+            authors,
+            categories,
+            pdfUrl,
+            published,
+            summary,
+            updated,
+          },
           sourceType: "arxiv",
           text: summary,
           title,

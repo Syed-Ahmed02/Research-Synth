@@ -35,6 +35,31 @@ const quoteFromPassage = (text: string): string => {
   return `${text.slice(0, 897)}...`;
 };
 
+const asString = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+
+const asStringArray = (value: unknown) => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const values = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+  return values.length > 0 ? values : undefined;
+};
+
+const parseDocumentVectorMetadata = (raw: unknown) => {
+  const metadata = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const summary = asString(metadata.summary);
+  const author = asString(metadata.author);
+  return {
+    authors: asStringArray(metadata.authors) ?? (author ? [author] : undefined),
+    categories: asStringArray(metadata.categories),
+    documentSummary: summary ? summary.slice(0, 700) : undefined,
+    published: asString(metadata.published),
+    updated: asString(metadata.updated),
+  };
+};
+
 const toRecord = (args: {
   jobId: string;
   passageId: string;
@@ -44,6 +69,13 @@ const toRecord = (args: {
   sourceType?: "wikipedia" | "arxiv" | "news" | "gov" | "web";
   text: string;
   locator: Locator;
+  documentMetadata?: {
+    authors?: string[];
+    published?: string;
+    updated?: string;
+    categories?: string[];
+    documentSummary?: string;
+  };
 }): PassageVectorRecord => {
   return {
     id: vectorIdForPassage(args.jobId, args.passageId),
@@ -54,6 +86,11 @@ const toRecord = (args: {
       jobId: args.jobId,
       url: args.url,
       title: args.title,
+      authors: args.documentMetadata?.authors,
+      published: args.documentMetadata?.published,
+      updated: args.documentMetadata?.updated,
+      categories: args.documentMetadata?.categories,
+      documentSummary: args.documentMetadata?.documentSummary,
       quote: quoteFromPassage(args.text),
       locator: args.locator,
       sourceType: args.sourceType,
@@ -130,6 +167,7 @@ export const backfillPassagesForJob = action({
           sourceType: doc.sourceType,
           text: passage.text,
           locator: passage.locator,
+          documentMetadata: parseDocumentVectorMetadata(doc.metadata),
         });
 
         await provider.upsertPassages({
