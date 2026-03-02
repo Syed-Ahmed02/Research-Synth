@@ -5,7 +5,7 @@ import { streamSynthesisText } from "@/lib/ai/openrouter";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { ResearchRunConfig } from "@/lib/ai/contracts";
-import { buildSynthesisPrompt, runWorkflowUntilSynthesis } from "@/lib/workflow/runner";
+import { decideClarification } from "@/lib/ai/clarify";
 import { z } from "zod";
 
 const RequestSchema = z.object({
@@ -72,6 +72,40 @@ const mergeConfig = (config?: Partial<ResearchRunConfig>): ResearchRunConfig => 
 
 const extractAssistantText = (responseMessage: unknown) => extractMessageText(responseMessage);
 
+const extractResourcesFromMarkdown = (markdown: string) => {
+  const resources: Array<{ url: string; title?: string }> = [];
+  const seen = new Set<string>();
+  const regex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  for (const match of markdown.matchAll(regex)) {
+    const title = (match[1] ?? "").trim();
+    const url = (match[2] ?? "").trim();
+    if (!url || seen.has(url)) {
+      continue;
+    }
+    if (!url.includes("arxiv.org")) {
+      continue;
+    }
+    seen.add(url);
+    resources.push({ url, title: title || undefined });
+    if (resources.length >= 15) {
+      break;
+    }
+  }
+  return resources;
+};
+
+const conversationContextFromMessages = (messages: unknown[]) => {
+  const lines: string[] = [];
+  for (const message of messages.slice(-8)) {
+    if (!message || typeof message !== "object") continue;
+    const role = typeof (message as { role?: unknown }).role === "string" ? (message as { role: string }).role : "unknown";
+    const text = extractMessageText(message).trim();
+    if (!text) continue;
+    lines.push(`${role.toUpperCase()}: ${text}`);
+  }
+  return lines.join("\n");
+};
+
 export async function POST(req: Request) {
   const bodyRaw = await req.json();
   const parsed = RequestSchema.safeParse(bodyRaw);
@@ -86,12 +120,11 @@ export async function POST(req: Request) {
   if (!process.env.OPENROUTER_API_KEY) {
     return new Response("OPENROUTER_API_KEY is not configured.", { status: 500 });
   }
+  if (!process.env.EXA_API_KEY) {
+    return new Response("EXA_API_KEY is not configured.", { status: 500 });
+  }
 
   const config = mergeConfig(parsed.data.config);
-  const webSearchEnabled = config.sourcesEnabled.includes("web");
-  if (webSearchEnabled && !process.env.EXA_API_KEY) {
-    return new Response("EXA_API_KEY is not configured but web source is enabled.", { status: 400 });
-  }
   const threadId = parsed.data.threadId ?? parsed.data.id;
   const runId = crypto.randomUUID();
   const userMessages = parsed.data.messages.filter(
@@ -103,69 +136,60 @@ export async function POST(req: Request) {
     return new Response("Please send a user question.", { status: 400 });
   }
 
+  // If the question is vague, ask follow-ups and don't start searching yet.
+  const clarification = await decideClarification({
+    config,
+    question,
+    conversationContext: conversationContextFromMessages(parsed.data.messages),
+  });
+  if (clarification.decision === "clarify") {
+    const followUps = clarification.followUpQuestions ?? [];
+    const followUpPrompt =
+      followUps.length > 0
+        ? `The user asked: ${question}\n\nAsk these follow-up questions (bulleted), then instruct the user to answer them in one reply:\n${followUps.map((q) => `- ${q}`).join("\n")}`
+        : `The user asked: ${question}\n\nAsk 2-4 follow-up questions to clarify what they mean, then instruct them to answer in one reply.`;
+
+    const streamResult = streamSynthesisText({
+      config,
+      system:
+        "You are a research assistant. Do NOT answer yet. Only ask clarifying questions to make the user request specific, then wait for their reply.",
+      prompt: followUpPrompt,
+    });
+
+    return streamResult.toUIMessageStreamResponse({
+      onError: () => "Failed to ask clarifying questions.",
+    });
+  }
+
   const convex = new ConvexHttpClient(convexUrl);
   let jobId: Id<"researchJobs"> | undefined;
 
   try {
     jobId = await convex.mutation(api.jobs.createJob, {
       config,
-      question,
+      question: clarification.refinedQuestion ?? question,
       runId,
       threadId,
     });
-
-    const synthesisInput = await runWorkflowUntilSynthesis({
-      config,
-      convex,
-      jobId,
-      question,
-      runId,
-      threadId,
-    });
-
-    await convex.mutation(api.jobs.setJobStatus, {
-      currentStage: "synthesize",
-      jobId,
-      status: "running",
-    });
-    await convex.mutation(api.jobs.appendEvent, {
-      jobId,
-      level: "info",
-      message: "[synthesize] starting",
-      payload: { claimCount: synthesisInput.claims.length },
-      runId,
-      stage: "synthesize",
-      threadId,
-    });
-
-    const reportJson = {
-      claims: synthesisInput.claims.map((claim) => ({
-        citations: claim.citations.map((citation) => citation._id),
-        claimId: claim._id,
-        status: claim.status,
-      })),
-    };
+    const refinedQuestion = clarification.refinedQuestion ?? question;
 
     const streamResult = streamSynthesisText({
       config,
-      prompt: buildSynthesisPrompt(synthesisInput),
-      stopWhen: webSearchEnabled ? stepCountIs(3) : undefined,
-      system: webSearchEnabled
-        ? "You are a research synthesizer. Use webSearch at most once when current web context materially improves the answer. Keep evidence-packet citations unchanged and clearly separate any web updates with explicit URLs."
-        : "You are a research synthesizer. Never invent sources. If evidence is missing, say unknown explicitly.",
-      tools: webSearchEnabled
-        ? {
-            webSearch: webSearch({
-              contents: {
-                livecrawl: "fallback",
-                summary: true,
-                text: { maxCharacters: 3000 },
-              },
-              numResults: 10,
-              type: "auto",
-            }),
-          }
-        : undefined,
+      system:
+        "You are a research assistant. First, use the webSearch tool to find relevant arXiv resources for the question.\n\nRules:\n- Use webSearch once.\n- Your search query MUST restrict to arXiv (use site:arxiv.org).\n- Use ONLY the webSearch results. Do not invent sources or URLs.\n- Output markdown with: ## Summary, ## Resources, ## Limits & Unknowns.\n- In ## Resources, include a ranked bullet list of markdown links, each with a 1-line note.\n- If no relevant arXiv results are found, say so and ask a clarifying question.",
+      tools: {
+        webSearch: webSearch({
+          numResults: 10,
+          type: "auto",
+          contents: {
+            summary: true,
+            text: { maxCharacters: 2500 },
+            livecrawl: "fallback",
+          },
+        }),
+      },
+      stopWhen: stepCountIs(2),
+      prompt: `Question:\n${refinedQuestion}\n\nDo:\n1) Call webSearch with query: site:arxiv.org ${refinedQuestion}\n2) Read the results and write the response.`,
     });
 
     return streamResult.toUIMessageStreamResponse({
@@ -188,6 +212,12 @@ export async function POST(req: Request) {
           return;
         }
         const reportMd = extractAssistantText(responseMessage);
+        const resources = extractResourcesFromMarkdown(reportMd);
+        const reportJson = {
+          refinedQuestion,
+          resources,
+          generatedAt: new Date().toISOString(),
+        };
         await convex.mutation(api.artifacts.upsertReport, {
           jobId,
           reportJson,
@@ -197,7 +227,7 @@ export async function POST(req: Request) {
           jobId,
           level: "info",
           message: "[synthesize] completed",
-          payload: { reportChars: reportMd.length },
+          payload: { reportChars: reportMd.length, resourceCount: resources.length },
           runId,
           stage: "synthesize",
           threadId,

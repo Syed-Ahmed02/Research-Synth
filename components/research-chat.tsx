@@ -15,6 +15,12 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import {
+  Source,
+  Sources,
+  SourcesContent,
+  SourcesTrigger,
+} from "@/components/ai-elements/sources";
+import {
   PromptInput,
   PromptInputBody,
   PromptInputFooter,
@@ -49,7 +55,7 @@ const defaultConfig: ChatConfig = {
     maxPassagesPerDoc: 4,
   },
   model: "anthropic/claude-3.5-sonnet",
-  sourcesEnabled: ["wikipedia", "arxiv"],
+  sourcesEnabled: ["web"],
 };
 
 type TimelineItem =
@@ -65,6 +71,7 @@ type TimelineItem =
       kind: "report";
       sort: number;
       reportMd: string;
+      reportJson?: unknown;
     };
 
 const THREAD_STORAGE_KEY = "research-synthesizer:thread-id";
@@ -210,6 +217,7 @@ export function ResearchChat() {
               kind: "report",
               sort: report.createdAt ?? sessionBaseTs,
               reportMd: report.reportMd,
+              reportJson: (report as { reportJson?: unknown }).reportJson,
             },
           ]
         : [];
@@ -218,6 +226,40 @@ export function ResearchChat() {
       (a, b) => a.sort - b.sort,
     );
   }, [job?.createdAt, messages, report, sessionBaseTs]);
+
+  const resourcesForReport = useCallback((reportJson: unknown) => {
+    if (!reportJson || typeof reportJson !== "object") {
+      return [];
+    }
+    const raw = (reportJson as { resources?: unknown }).resources;
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw
+      .map((item) => {
+        if (!item || typeof item !== "object") {
+          return null;
+        }
+        const url = typeof (item as { url?: unknown }).url === "string" ? (item as { url: string }).url : "";
+        const title =
+          typeof (item as { title?: unknown }).title === "string" ? (item as { title: string }).title : undefined;
+        const sourceType =
+          typeof (item as { sourceType?: unknown }).sourceType === "string"
+            ? (item as { sourceType: string }).sourceType
+            : undefined;
+        if (!url) {
+          return null;
+        }
+        return { url, title, sourceType };
+      })
+      .filter(
+        (
+          item,
+        ): item is { url: string; title: string | undefined; sourceType: string | undefined } =>
+          item !== null,
+      )
+      .slice(0, 12);
+  }, []);
 
   const exportMarkdown = useCallback(() => {
     const markdown = timeline
@@ -426,6 +468,31 @@ export function ResearchChat() {
                   <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
                     Durable Report
                   </p>
+                  {item.reportJson ? (() => {
+                    const resources = resourcesForReport(item.reportJson);
+                    if (resources.length === 0) {
+                      return null;
+                    }
+                    return (
+                      <Sources className="mb-3">
+                        <SourcesTrigger count={resources.length} />
+                        <SourcesContent>
+                          {resources.map((resource) => (
+                            <Source href={resource.url} key={resource.url} title={resource.title ?? resource.url}>
+                              <span className="block font-medium">
+                                {(resource.title ?? resource.url).trim()}
+                                {resource.sourceType ? (
+                                  <span className="ml-2 text-muted-foreground">
+                                    ({resource.sourceType})
+                                  </span>
+                                ) : null}
+                              </span>
+                            </Source>
+                          ))}
+                        </SourcesContent>
+                      </Sources>
+                    );
+                  })() : null}
                   <MessageResponse>{item.reportMd}</MessageResponse>
                 </MessageContent>
               </Message>
