@@ -1,5 +1,10 @@
+import { AppShell } from "@/components/app-shell";
 import { ResearchChat } from "@/components/research-chat";
 
 export default function Home() {
-  return <ResearchChat />;
+  return (
+    <AppShell>
+      <ResearchChat />
+    </AppShell>
+  );
 }

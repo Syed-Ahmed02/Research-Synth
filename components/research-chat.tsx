@@ -2,7 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { useQuery } from "convex/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import {
   Conversation,
@@ -14,6 +14,12 @@ import {
   MessageContent,
   MessageResponse,
 } from "@/components/ai-elements/message";
+import {
+  Source,
+  Sources,
+  SourcesContent,
+  SourcesTrigger,
+} from "@/components/ai-elements/sources";
 import {
   PromptInput,
   PromptInputBody,
@@ -27,9 +33,10 @@ import {
   PromptInputTextarea,
   PromptInputTools,
 } from "@/components/ai-elements/prompt-input";
+import { useChatSession } from "@/components/chat-session-context";
 import { Button } from "@/components/ui/button";
 import { api } from "@/convex/_generated/api";
-import type { DepthPreset, SourceType } from "@/lib/ai/contracts";
+import { DEFAULT_MODEL_BY_DEPTH, type DepthPreset, type SourceType } from "@/lib/ai/contracts";
 import { cn } from "@/lib/utils";
 
 type ChatConfig = {
@@ -48,8 +55,8 @@ const defaultConfig: ChatConfig = {
     maxDocs: 8,
     maxPassagesPerDoc: 4,
   },
-  model: "anthropic/claude-3.5-sonnet",
-  sourcesEnabled: ["wikipedia", "arxiv"],
+  model: "anthropic/claude-opus-4.6",
+  sourcesEnabled: ["web"],
 };
 
 type TimelineItem =
@@ -65,9 +72,10 @@ type TimelineItem =
       kind: "report";
       sort: number;
       reportMd: string;
+      reportJson?: unknown;
     };
+type ChatTimelineItem = Extract<TimelineItem, { kind: "chat" }>;
 
-const THREAD_STORAGE_KEY = "research-synthesizer:thread-id";
 const ALL_SOURCES: SourceType[] = ["wikipedia", "arxiv", "news", "gov", "web"];
 const STAGE_LABELS: Record<string, string> = {
   cross_validate: "Cross-validating",
@@ -102,45 +110,19 @@ const textFromParts = (message: unknown) => {
     .join("");
 };
 
-const timestampFromUnknown = (value: unknown) => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string") {
-    const asNumber = Number(value);
-    if (Number.isFinite(asNumber)) {
-      return asNumber;
-    }
-    const parsed = Date.parse(value);
-    if (!Number.isNaN(parsed)) {
-      return parsed;
-    }
-  }
-  if (value instanceof Date) {
-    return value.getTime();
-  }
-  return undefined;
-};
-
 export function ResearchChat() {
-  const [threadId, setThreadId] = useState<string | null>(null);
+  const { threadId, openSession, createNewChat } = useChatSession();
   const [config, setConfig] = useState<ChatConfig>(defaultConfig);
   const [sessionBaseTs] = useState(() => Date.now());
-
-  useEffect(() => {
-    const stored = window.localStorage.getItem(THREAD_STORAGE_KEY);
-    const resolved = stored ?? crypto.randomUUID();
-    if (!stored) {
-      window.localStorage.setItem(THREAD_STORAGE_KEY, resolved);
-    }
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- initialize thread id from localStorage once on mount
-    setThreadId(resolved);
-  }, []);
 
   const { messages, sendMessage, status, stop } = useChat({
     id: threadId ?? undefined,
   });
 
+  const sessionMessages = useQuery(
+    api.chat.listMessagesByThread,
+    threadId ? { threadId, limit: 200 } : "skip",
+  );
   const jobs = useQuery(api.jobs.listJobs, threadId ? { threadId, limit: 20 } : "skip");
   const job = jobs?.[0];
   const report = useQuery(
@@ -189,18 +171,64 @@ export function ResearchChat() {
 
   const timeline = useMemo<TimelineItem[]>(() => {
     const baseTs = job?.createdAt ?? sessionBaseTs;
-    const chatItems: TimelineItem[] = messages.map((message, index) => {
-      const createdAt = timestampFromUnknown(
-        (message as { createdAt?: unknown }).createdAt,
+    const persistedChatItems: ChatTimelineItem[] = (sessionMessages ?? []).map((message, index) => ({
+      key: `persisted-${message._id}`,
+      kind: "chat",
+      role: message.role,
+      sort: message.createdAt ?? baseTs + index,
+      text: message.text,
+    }));
+
+    const latestPersistedAssistant = [...persistedChatItems]
+      .reverse()
+      .find((item) => item.role === "assistant");
+    const latestLiveAssistant = [...messages]
+      .reverse()
+      .find(
+        (message) =>
+          (message as { role?: string }).role === "assistant" &&
+          textFromParts(message).trim().length > 0,
       );
-      return {
-        key: `chat-${(message as { id: string }).id}`,
+    const transientAssistantText = latestLiveAssistant
+      ? textFromParts(latestLiveAssistant).trim()
+      : "";
+    const shouldShowTransientAssistant =
+      (status === "streaming" || status === "submitted") &&
+      transientAssistantText.length > 0 &&
+      transientAssistantText !== (latestPersistedAssistant?.text ?? "").trim();
+    const transientSortBase = (sessionMessages?.at(-1)?.createdAt ?? baseTs) + 1;
+
+    const liveOverlayItems: ChatTimelineItem[] = shouldShowTransientAssistant
+      ? [
+          {
+            key: "chat-live-assistant",
+            kind: "chat",
+            role: "assistant",
+            sort: transientSortBase,
+            text: transientAssistantText,
+          },
+        ]
+      : [];
+
+    const chatItems: ChatTimelineItem[] = [...persistedChatItems, ...liveOverlayItems];
+    const liveUserMessages = messages.filter((message) => (message as { role?: string }).role === "user");
+    const latestLiveUser = liveUserMessages.at(-1);
+    const latestPersistedUser = [...persistedChatItems]
+      .reverse()
+      .find((item) => item.role === "user");
+    const latestLiveUserText = latestLiveUser ? textFromParts(latestLiveUser).trim() : "";
+    if (
+      latestLiveUserText &&
+      latestLiveUserText !== (latestPersistedUser?.text ?? "").trim()
+    ) {
+      chatItems.push({
+        key: "chat-live-user",
         kind: "chat",
-        role: (message as { role: string }).role,
-        sort: createdAt ?? baseTs + index,
-        text: textFromParts(message),
-      };
-    });
+        role: "user",
+        sort: transientSortBase - 1,
+        text: latestLiveUserText,
+      });
+    }
 
     const reportItem: TimelineItem[] =
       report?.reportMd && report.reportMd.trim()
@@ -210,6 +238,7 @@ export function ResearchChat() {
               kind: "report",
               sort: report.createdAt ?? sessionBaseTs,
               reportMd: report.reportMd,
+              reportJson: (report as { reportJson?: unknown }).reportJson,
             },
           ]
         : [];
@@ -217,7 +246,41 @@ export function ResearchChat() {
     return [...chatItems, ...reportItem].sort(
       (a, b) => a.sort - b.sort,
     );
-  }, [job?.createdAt, messages, report, sessionBaseTs]);
+  }, [job?.createdAt, messages, report, sessionBaseTs, sessionMessages, status]);
+
+  const resourcesForReport = useCallback((reportJson: unknown) => {
+    if (!reportJson || typeof reportJson !== "object") {
+      return [];
+    }
+    const raw = (reportJson as { resources?: unknown }).resources;
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw
+      .map((item) => {
+        if (!item || typeof item !== "object") {
+          return null;
+        }
+        const url = typeof (item as { url?: unknown }).url === "string" ? (item as { url: string }).url : "";
+        const title =
+          typeof (item as { title?: unknown }).title === "string" ? (item as { title: string }).title : undefined;
+        const sourceType =
+          typeof (item as { sourceType?: unknown }).sourceType === "string"
+            ? (item as { sourceType: string }).sourceType
+            : undefined;
+        if (!url) {
+          return null;
+        }
+        return { url, title, sourceType };
+      })
+      .filter(
+        (
+          item,
+        ): item is { url: string; title: string | undefined; sourceType: string | undefined } =>
+          item !== null,
+      )
+      .slice(0, 12);
+  }, []);
 
   const exportMarkdown = useCallback(() => {
     const markdown = timeline
@@ -291,31 +354,37 @@ export function ResearchChat() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-4 px-4 py-6 sm:px-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Research Synthesizer</h1>
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">
-            One unified chat: prompts, streaming synthesis, stage updates, and report output.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button onClick={exportMarkdown} size="sm" type="button" variant="outline">
-            Export Markdown
-          </Button>
-          <Button onClick={exportJson} size="sm" type="button" variant="outline">
-            Export JSON
-          </Button>
-        </div>
-      </header>
+    <main className="mx-auto flex min-h-0 min-w-0 max-w-5xl flex-1 flex-col gap-4 px-4 py-6 sm:px-6">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-4">
+        <header className="shrink-0 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold">Research Synthesizer</h1>
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">
+              One unified chat: prompts, streaming synthesis, stage updates, and report output.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button onClick={exportMarkdown} size="sm" type="button" variant="outline">
+              Export Markdown
+            </Button>
+            <Button onClick={exportJson} size="sm" type="button" variant="outline">
+              Export JSON
+            </Button>
+          </div>
+        </header>
 
-      <div className="flex flex-wrap gap-2 rounded-lg border p-3 text-sm">
+        <div className="shrink-0 flex flex-wrap gap-2 rounded-lg border p-3 text-sm">
         <label className="flex items-center gap-2">
           Depth
           <PromptInputSelect
-            onValueChange={(value) =>
-              setConfig((prev) => ({ ...prev, depthPreset: value as DepthPreset }))
-            }
+            onValueChange={(value) => {
+              const preset = value as DepthPreset;
+              setConfig((prev) => ({
+                ...prev,
+                depthPreset: preset,
+                model: DEFAULT_MODEL_BY_DEPTH[preset],
+              }));
+            }}
             value={config.depthPreset}
           >
             <PromptInputSelectTrigger className="h-8 border px-2 text-xs">
@@ -376,10 +445,10 @@ export function ResearchChat() {
             );
           })}
         </div>
-      </div>
+        </div>
 
-      <Conversation className="h-[60vh] rounded-lg border">
-        <ConversationContent className="gap-4 p-4">
+        <Conversation className="min-h-0 flex-1 overflow-auto rounded-lg border">
+        <ConversationContent className="flex flex-col gap-4 p-4">
           <div className="sticky top-0 z-10 -mx-1 flex items-center justify-between rounded-md border bg-background/90 px-3 py-2 text-xs backdrop-blur">
             <span className="text-zinc-500">Research status</span>
             <span
@@ -426,15 +495,40 @@ export function ResearchChat() {
                   <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
                     Durable Report
                   </p>
+                  {item.reportJson ? (() => {
+                    const resources = resourcesForReport(item.reportJson);
+                    if (resources.length === 0) {
+                      return null;
+                    }
+                    return (
+                      <Sources className="mb-3">
+                        <SourcesTrigger count={resources.length} />
+                        <SourcesContent>
+                          {resources.map((resource) => (
+                            <Source href={resource.url} key={resource.url} title={resource.title ?? resource.url}>
+                              <span className="block font-medium">
+                                {(resource.title ?? resource.url).trim()}
+                                {resource.sourceType ? (
+                                  <span className="ml-2 text-muted-foreground">
+                                    ({resource.sourceType})
+                                  </span>
+                                ) : null}
+                              </span>
+                            </Source>
+                          ))}
+                        </SourcesContent>
+                      </Sources>
+                    );
+                  })() : null}
                   <MessageResponse>{item.reportMd}</MessageResponse>
                 </MessageContent>
               </Message>
             );
           })}
         </ConversationContent>
-      </Conversation>
+        </Conversation>
 
-      <PromptInput className="w-full" onSubmit={handleSubmit}>
+        <PromptInput className="shrink-0 w-full" onSubmit={handleSubmit}>
         <PromptInputBody>
           <PromptInputTextarea placeholder="Ask a research question..." />
         </PromptInputBody>
@@ -446,7 +540,8 @@ export function ResearchChat() {
           </PromptInputTools>
           <PromptInputSubmit onStop={stop} status={status} />
         </PromptInputFooter>
-      </PromptInput>
+        </PromptInput>
+      </section>
     </main>
   );
 }

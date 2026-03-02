@@ -9,6 +9,12 @@ export type StageName =
 export type SourceType = "wikipedia" | "arxiv" | "news" | "gov" | "web";
 export type DepthPreset = "fast" | "standard" | "deep";
 
+export const DEFAULT_MODEL_BY_DEPTH: Record<DepthPreset, string> = {
+  deep: "openai/gpt-5.2",
+  fast: "openai/gpt-4o-mini",
+  standard: "anthropic/claude-opus-4.6",
+};
+
 export type ResearchRunConfig = {
   depthPreset: DepthPreset;
   sourcesEnabled: SourceType[];

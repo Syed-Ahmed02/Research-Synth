@@ -1,14 +1,10 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateObject, streamText } from "ai";
+import type { ModelMessage } from "ai";
 import { z } from "zod";
 
 import type { DepthPreset, ResearchRunConfig } from "./contracts";
-
-const DEFAULT_MODEL_BY_DEPTH: Record<DepthPreset, string> = {
-  deep: "anthropic/claude-3.7-sonnet",
-  fast: "openai/gpt-4o-mini",
-  standard: "anthropic/claude-3.5-sonnet",
-};
+import { DEFAULT_MODEL_BY_DEPTH } from "./contracts";
 
 const openrouter = createOpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY,
@@ -37,17 +33,24 @@ export async function generateStructured<TSchema extends z.ZodTypeAny>(args: {
 
 export function streamSynthesisText(args: {
   system: string;
-  prompt: string;
+  prompt?: string;
+  messages?: ModelMessage[];
   config: Pick<ResearchRunConfig, "depthPreset" | "model">;
   tools?: Parameters<typeof streamText>[0]["tools"];
   stopWhen?: Parameters<typeof streamText>[0]["stopWhen"];
 }) {
-  return streamText({
+  if (!args.prompt && !args.messages?.length) {
+    throw new Error("streamSynthesisText requires either prompt or messages.");
+  }
+  const base = {
     model: resolveModel(args.config),
-    prompt: args.prompt,
     system: args.system,
     temperature: 0.2,
     tools: args.tools,
     stopWhen: args.stopWhen,
-  });
+  };
+  if (args.messages && args.messages.length > 0) {
+    return streamText({ ...base, messages: args.messages });
+  }
+  return streamText({ ...base, prompt: args.prompt as string });
 }

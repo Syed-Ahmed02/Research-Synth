@@ -9,6 +9,7 @@
  */
 
 import type * as artifacts from "../artifacts.js";
+import type * as chat from "../chat.js";
 import type * as jobs from "../jobs.js";
 import type * as retrieval from "../retrieval.js";
 
@@ -20,6 +21,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   artifacts: typeof artifacts;
+  chat: typeof chat;
   jobs: typeof jobs;
   retrieval: typeof retrieval;
 }>;
