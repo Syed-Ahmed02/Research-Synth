@@ -1,6 +1,6 @@
 ---
 name: Synthesizer UI (AI Elements)
-overview: "Define a chat-first Next.js UI using Vercel AI SDK AI Elements + shadcn/ui where new research starts in chat, stage/evidence updates appear in-chat, and synthesis streams token-by-token in real time."
+overview: Define a chat-first Next.js UI using Vercel AI SDK AI Elements + shadcn/ui where new research starts in chat, stage/evidence updates appear in-chat, and synthesis streams token-by-token in real time.
 todos:
   - id: ui-foundations
     content: Initialize shadcn/ui + Tailwind theme (light/dark), add AI Elements to the project, and set up a chat-first app shell.

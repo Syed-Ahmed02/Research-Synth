@@ -2,10 +2,35 @@
 
 import { useChat } from "@ai-sdk/react";
 import { useQuery } from "convex/react";
-import { useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
+import {
+  Conversation,
+  ConversationContent,
+  ConversationEmptyState,
+} from "@/components/ai-elements/conversation";
+import {
+  Message,
+  MessageContent,
+  MessageResponse,
+} from "@/components/ai-elements/message";
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputFooter,
+  PromptInputSelect,
+  PromptInputSelectContent,
+  PromptInputSelectItem,
+  PromptInputSelectTrigger,
+  PromptInputSelectValue,
+  PromptInputSubmit,
+  PromptInputTextarea,
+  PromptInputTools,
+} from "@/components/ai-elements/prompt-input";
+import { Button } from "@/components/ui/button";
 import { api } from "@/convex/_generated/api";
 import type { DepthPreset, SourceType } from "@/lib/ai/contracts";
+import { cn } from "@/lib/utils";
 
 type ChatConfig = {
   depthPreset: DepthPreset;
@@ -25,6 +50,32 @@ const defaultConfig: ChatConfig = {
   },
   model: "anthropic/claude-3.5-sonnet",
   sourcesEnabled: ["wikipedia", "arxiv"],
+};
+
+type TimelineItem =
+  | {
+      key: string;
+      kind: "chat";
+      role: string;
+      sort: number;
+      text: string;
+    }
+  | {
+      key: string;
+      kind: "report";
+      sort: number;
+      reportMd: string;
+    };
+
+const THREAD_STORAGE_KEY = "research-synthesizer:thread-id";
+const ALL_SOURCES: SourceType[] = ["wikipedia", "arxiv", "news", "gov", "web"];
+const STAGE_LABELS: Record<string, string> = {
+  cross_validate: "Cross-validating",
+  critique: "Critiquing",
+  extract: "Extracting",
+  gather: "Gathering",
+  plan: "Planning",
+  synthesize: "Synthesizing",
 };
 
 const textFromParts = (message: unknown) => {
@@ -51,163 +102,351 @@ const textFromParts = (message: unknown) => {
     .join("");
 };
 
-export function ResearchChat() {
-  const [input, setInput] = useState("");
-  const [config, setConfig] = useState<ChatConfig>(defaultConfig);
-
-  const { id, messages, sendMessage, status } = useChat();
-  const latestJobs = useQuery(api.jobs.listJobs, { limit: 50 });
-  const job = useMemo(
-    () => latestJobs?.find((candidate) => candidate.threadId === id),
-    [id, latestJobs],
-  );
-  const events = useQuery(
-    api.jobs.listJobEvents,
-    job ? { jobId: job._id, limit: 120 } : "skip",
-  );
-  const report = useQuery(api.artifacts.getReportByJob, job ? { jobId: job._id } : "skip");
-
-  const handleSubmit = (event: FormEvent) => {
-    event.preventDefault();
-    const text = input.trim();
-    if (!text || status !== "ready") {
-      return;
+const timestampFromUnknown = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const asNumber = Number(value);
+    if (Number.isFinite(asNumber)) {
+      return asNumber;
     }
-    sendMessage({ text }, { body: { config } });
-    setInput("");
-  };
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+  return undefined;
+};
+
+export function ResearchChat() {
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const [config, setConfig] = useState<ChatConfig>(defaultConfig);
+  const [sessionBaseTs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(THREAD_STORAGE_KEY);
+    const resolved = stored ?? crypto.randomUUID();
+    if (!stored) {
+      window.localStorage.setItem(THREAD_STORAGE_KEY, resolved);
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initialize thread id from localStorage once on mount
+    setThreadId(resolved);
+  }, []);
+
+  const { messages, sendMessage, status, stop } = useChat({
+    id: threadId ?? undefined,
+  });
+
+  const jobs = useQuery(api.jobs.listJobs, threadId ? { threadId, limit: 20 } : "skip");
+  const job = jobs?.[0];
+  const report = useQuery(
+    api.artifacts.getReportByJob,
+    job ? { jobId: job._id } : "skip",
+  );
+
+  const stageLabel = useMemo(() => {
+    if (!job?.currentStage) {
+      return null;
+    }
+    return STAGE_LABELS[job.currentStage] ?? job.currentStage;
+  }, [job?.currentStage]);
+
+  const liveStatusText = useMemo(() => {
+    if (job?.status === "running") {
+      return stageLabel ? `${stageLabel}...` : "Thinking...";
+    }
+    if (job?.status === "queued") {
+      return "Queued...";
+    }
+    if (job?.status === "succeeded") {
+      return "Complete";
+    }
+    if (job?.status === "failed") {
+      return "Failed";
+    }
+    if (status === "submitted" || status === "streaming") {
+      return "Thinking...";
+    }
+    return "Ready";
+  }, [job?.status, stageLabel, status]);
+
+  const toggleSource = useCallback((source: SourceType) => {
+    setConfig((prev) => {
+      const enabled = prev.sourcesEnabled.includes(source);
+      const next = enabled
+        ? prev.sourcesEnabled.filter((item) => item !== source)
+        : [...prev.sourcesEnabled, source];
+      return {
+        ...prev,
+        sourcesEnabled: next.length > 0 ? next : [source],
+      };
+    });
+  }, []);
+
+  const timeline = useMemo<TimelineItem[]>(() => {
+    const baseTs = job?.createdAt ?? sessionBaseTs;
+    const chatItems: TimelineItem[] = messages.map((message, index) => {
+      const createdAt = timestampFromUnknown(
+        (message as { createdAt?: unknown }).createdAt,
+      );
+      return {
+        key: `chat-${(message as { id: string }).id}`,
+        kind: "chat",
+        role: (message as { role: string }).role,
+        sort: createdAt ?? baseTs + index,
+        text: textFromParts(message),
+      };
+    });
+
+    const reportItem: TimelineItem[] =
+      report?.reportMd && report.reportMd.trim()
+        ? [
+            {
+              key: `report-${report._id}`,
+              kind: "report",
+              sort: report.createdAt ?? sessionBaseTs,
+              reportMd: report.reportMd,
+            },
+          ]
+        : [];
+
+    return [...chatItems, ...reportItem].sort(
+      (a, b) => a.sort - b.sort,
+    );
+  }, [job?.createdAt, messages, report, sessionBaseTs]);
+
+  const exportMarkdown = useCallback(() => {
+    const markdown = timeline
+      .map((item) => {
+        if (item.kind === "chat") {
+          const label = item.role === "user" ? "User" : "Assistant";
+          return `### ${label}\n\n${item.text}`;
+        }
+        return `### Durable Report\n\n${item.reportMd}`;
+      })
+      .join("\n\n---\n\n");
+
+    const blob = new Blob([markdown], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "research-thread.md";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }, [timeline]);
+
+  const exportJson = useCallback(() => {
+    const payload = {
+      config,
+      job: job ?? null,
+      liveStatusText,
+      report: report ?? null,
+      threadId,
+      timeline,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "research-thread.json";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }, [config, job, liveStatusText, report, threadId, timeline]);
+
+  const handleSubmit = useCallback(
+    async ({ text }: { text: string }) => {
+      const prompt = text.trim();
+      if (!prompt || status !== "ready" || !threadId) {
+        return;
+      }
+      sendMessage(
+        { text: prompt },
+        {
+          body: {
+            config,
+            threadId,
+          },
+        },
+      );
+    },
+    [config, sendMessage, status, threadId],
+  );
+
+  if (!threadId) {
+    return (
+      <main className="mx-auto flex min-h-screen w-full max-w-5xl items-center justify-center px-4 py-8">
+        <p className="text-sm text-zinc-500">Preparing research chat...</p>
+      </main>
+    );
+  }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-6xl gap-6 px-6 py-8">
-      <section className="flex min-w-0 flex-1 flex-col gap-4">
-        <h1 className="text-2xl font-semibold">Research Synthesizer</h1>
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">
-          Ask a question. The agent pipeline runs durably and streams synthesis output in chat.
-        </p>
-
-        <div className="flex flex-wrap gap-3 rounded-lg border p-3 text-sm">
-          <label className="flex items-center gap-2">
-            Depth
-            <select
-              className="rounded border bg-background px-2 py-1"
-              onChange={(e) =>
-                setConfig((prev) => ({ ...prev, depthPreset: e.target.value as DepthPreset }))
-              }
-              value={config.depthPreset}
-            >
-              <option value="fast">fast</option>
-              <option value="standard">standard</option>
-              <option value="deep">deep</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-2">
-            Model
-            <input
-              className="w-64 rounded border bg-background px-2 py-1"
-              onChange={(e) => setConfig((prev) => ({ ...prev, model: e.target.value }))}
-              value={config.model}
-            />
-          </label>
-          <label className="flex items-center gap-2">
-            Max docs
-            <input
-              className="w-20 rounded border bg-background px-2 py-1"
-              min={1}
-              onChange={(e) =>
-                setConfig((prev) => ({
-                  ...prev,
-                  limits: {
-                    ...prev.limits,
-                    maxDocs: Number(e.target.value || 1),
-                  },
-                }))
-              }
-              type="number"
-              value={config.limits.maxDocs}
-            />
-          </label>
+    <main className="mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-4 px-4 py-6 sm:px-6">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Research Synthesizer</h1>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            One unified chat: prompts, streaming synthesis, stage updates, and report output.
+          </p>
         </div>
-
-        <div className="flex min-h-[360px] flex-col gap-3 rounded-lg border p-4">
-          {messages.map((message) => (
-            <article
-              className="rounded-md border p-3"
-              key={(message as { id: string }).id}
-            >
-              <header className="mb-2 text-xs font-medium uppercase text-zinc-500">
-                {(message as { role: string }).role}
-              </header>
-              <pre className="whitespace-pre-wrap text-sm">{textFromParts(message)}</pre>
-            </article>
-          ))}
-          {messages.length === 0 ? (
-            <p className="text-sm text-zinc-500">
-              Start with a question like “What is the current state of federated learning in healthcare?”
-            </p>
-          ) : null}
+        <div className="flex items-center gap-2">
+          <Button onClick={exportMarkdown} size="sm" type="button" variant="outline">
+            Export Markdown
+          </Button>
+          <Button onClick={exportJson} size="sm" type="button" variant="outline">
+            Export JSON
+          </Button>
         </div>
+      </header>
 
-        <form className="flex gap-2" onSubmit={handleSubmit}>
-          <input
-            className="flex-1 rounded-md border bg-background px-3 py-2 text-sm"
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask a research question..."
-            value={input}
-          />
-          <button
-            className="rounded-md border px-4 py-2 text-sm disabled:opacity-50"
-            disabled={status !== "ready"}
-            type="submit"
+      <div className="flex flex-wrap gap-2 rounded-lg border p-3 text-sm">
+        <label className="flex items-center gap-2">
+          Depth
+          <PromptInputSelect
+            onValueChange={(value) =>
+              setConfig((prev) => ({ ...prev, depthPreset: value as DepthPreset }))
+            }
+            value={config.depthPreset}
           >
-            {status === "ready" ? "Run" : "Running..."}
-          </button>
-        </form>
-      </section>
+            <PromptInputSelectTrigger className="h-8 border px-2 text-xs">
+              <PromptInputSelectValue />
+            </PromptInputSelectTrigger>
+            <PromptInputSelectContent>
+              <PromptInputSelectItem value="fast">fast</PromptInputSelectItem>
+              <PromptInputSelectItem value="standard">standard</PromptInputSelectItem>
+              <PromptInputSelectItem value="deep">deep</PromptInputSelectItem>
+            </PromptInputSelectContent>
+          </PromptInputSelect>
+        </label>
+        <label className="flex items-center gap-2">
+          Model
+          <input
+            className="h-8 w-64 rounded border bg-background px-2 text-xs"
+            onChange={(event) =>
+              setConfig((prev) => ({ ...prev, model: event.currentTarget.value }))
+            }
+            value={config.model}
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          Max docs
+          <input
+            className="h-8 w-20 rounded border bg-background px-2 text-xs"
+            min={1}
+            onChange={(event) =>
+              setConfig((prev) => ({
+                ...prev,
+                limits: {
+                  ...prev.limits,
+                  maxDocs: Number(event.currentTarget.value || 1),
+                },
+              }))
+            }
+            type="number"
+            value={config.limits.maxDocs}
+          />
+        </label>
+        <div className="flex items-center gap-1">
+          {ALL_SOURCES.map((source) => {
+            const isEnabled = config.sourcesEnabled.includes(source);
+            return (
+              <button
+                className={cn(
+                  "rounded-full border px-2 py-1 text-xs capitalize",
+                  isEnabled
+                    ? "border-foreground bg-foreground text-background"
+                    : "border-zinc-300 text-zinc-600 dark:border-zinc-700 dark:text-zinc-300",
+                )}
+                key={source}
+                onClick={() => toggleSource(source)}
+                type="button"
+              >
+                {source}
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
-      <aside className="w-full max-w-md space-y-4">
-        <section className="rounded-lg border p-4">
-          <h2 className="mb-2 text-sm font-semibold">Run State</h2>
-          {job ? (
-            <div className="space-y-1 text-sm">
-              <p>
-                <span className="font-medium">Status:</span> {job.status}
-              </p>
-              <p>
-                <span className="font-medium">Stage:</span> {job.currentStage}
-              </p>
-              <p className="line-clamp-3 text-zinc-600 dark:text-zinc-400">{job.question}</p>
-            </div>
-          ) : (
-            <p className="text-sm text-zinc-500">No run yet for this chat thread.</p>
-          )}
-        </section>
-
-        <section className="rounded-lg border p-4">
-          <h2 className="mb-2 text-sm font-semibold">Stage Events</h2>
-          <div className="max-h-72 space-y-2 overflow-auto pr-1 text-xs">
-            {(events ?? []).map((event) => (
-              <div className="rounded border p-2" key={event._id}>
-                <p className="font-medium">
-                  {event.stage} · {event.level}
-                </p>
-                <p className="text-zinc-600 dark:text-zinc-400">{event.message}</p>
-              </div>
-            ))}
-            {!events?.length ? (
-              <p className="text-zinc-500">Events will appear here as stages run.</p>
-            ) : null}
+      <Conversation className="h-[60vh] rounded-lg border">
+        <ConversationContent className="gap-4 p-4">
+          <div className="sticky top-0 z-10 -mx-1 flex items-center justify-between rounded-md border bg-background/90 px-3 py-2 text-xs backdrop-blur">
+            <span className="text-zinc-500">Research status</span>
+            <span
+              className={cn(
+                "rounded-full border px-2 py-1 font-medium",
+                liveStatusText === "Complete" &&
+                  "border-emerald-400 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                liveStatusText === "Failed" &&
+                  "border-red-400 bg-red-500/10 text-red-700 dark:text-red-300",
+                (liveStatusText.endsWith("...") || liveStatusText === "Ready") &&
+                  "border-blue-400 bg-blue-500/10 text-blue-700 dark:text-blue-300",
+              )}
+            >
+              {liveStatusText}
+            </span>
           </div>
-        </section>
 
-        <section className="rounded-lg border p-4">
-          <h2 className="mb-2 text-sm font-semibold">Durable Report</h2>
-          {report ? (
-            <pre className="max-h-72 overflow-auto whitespace-pre-wrap text-xs">{report.reportMd}</pre>
-          ) : (
-            <p className="text-xs text-zinc-500">Report appears after synthesis completes.</p>
-          )}
-        </section>
-      </aside>
+          {timeline.length === 0 ? (
+            <ConversationEmptyState
+              description="Ask a question to start a run. You will see one live status badge update as stages progress."
+              title="Start your first research thread"
+            />
+          ) : null}
+
+          {timeline.map((item) => {
+            if (item.kind === "chat") {
+              const from = item.role === "user" ? "user" : "assistant";
+              return (
+                <Message from={from} key={item.key}>
+                  <MessageContent>
+                    {from === "assistant" ? (
+                      <MessageResponse>{item.text}</MessageResponse>
+                    ) : (
+                      <p className="whitespace-pre-wrap">{item.text}</p>
+                    )}
+                  </MessageContent>
+                </Message>
+              );
+            }
+
+            return (
+              <Message from="assistant" key={item.key}>
+                <MessageContent className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                    Durable Report
+                  </p>
+                  <MessageResponse>{item.reportMd}</MessageResponse>
+                </MessageContent>
+              </Message>
+            );
+          })}
+        </ConversationContent>
+      </Conversation>
+
+      <PromptInput className="w-full" onSubmit={handleSubmit}>
+        <PromptInputBody>
+          <PromptInputTextarea placeholder="Ask a research question..." />
+        </PromptInputBody>
+        <PromptInputFooter>
+          <PromptInputTools>
+            <p className="px-2 text-xs text-zinc-500">
+              {liveStatusText}
+            </p>
+          </PromptInputTools>
+          <PromptInputSubmit onStop={stop} status={status} />
+        </PromptInputFooter>
+      </PromptInput>
     </main>
   );
 }
