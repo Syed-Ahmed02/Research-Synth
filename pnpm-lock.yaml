@@ -14,6 +14,9 @@ importers:
       '@base-ui/react':
         specifier: ^1.0.0
         version: 1.0.0(@types/react@19.2.14)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
+      '@exalabs/ai-sdk':
+        specifier: ^1.0.5
+        version: 1.0.5(ai@6.0.105(zod@4.3.6))
       '@openrouter/ai-sdk-provider':
         specifier: ^2.2.3
         version: 2.2.3(ai@6.0.105(zod@4.3.6))(zod@4.3.6)
@@ -558,6 +561,11 @@ packages:
   '@eslint/plugin-kit@0.4.1':
     resolution: {integrity: sha512-43/qtrDUokr7LJqoF2c3+RInu/t4zfrpYdoSDfYyhg52rwLV6TnOvdG4fXm7IkSB3wErkcmJS9iEhjVtOSEjjA==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+
+  '@exalabs/ai-sdk@1.0.5':
+    resolution: {integrity: sha512-+2Sv8+JmrjFrmpiOlE9bzbZeko8ceym7lR3mkopLtnhjZp+EjDOm3rxaouf7nxwG6E6f0y3F2VZfmt0wupq7eA==}
+    peerDependencies:
+      ai: ^5.0.83
 
   '@floating-ui/core@1.7.4':
     resolution: {integrity: sha512-C3HlIdsBxszvm5McXlB8PeOEWfBhcGBTZGkGlWc2U0KFY5IwG5OQEuQ8rq52DZmcHDlPLd+YFBK+cZcytwIFWg==}
@@ -5627,6 +5635,11 @@ snapshots:
     dependencies:
       '@eslint/core': 0.17.0
       levn: 0.4.1
+
+  '@exalabs/ai-sdk@1.0.5(ai@6.0.105(zod@4.3.6))':
+    dependencies:
+      ai: 6.0.105(zod@4.3.6)
+      zod: 3.25.76
 
   '@floating-ui/core@1.7.4':
     dependencies:

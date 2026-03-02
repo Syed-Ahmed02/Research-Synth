@@ -1,4 +1,6 @@
 import { ConvexHttpClient } from "convex/browser";
+import { stepCountIs } from "ai";
+import { webSearch } from "@exalabs/ai-sdk";
 import { streamSynthesisText } from "@/lib/ai/openrouter";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -86,6 +88,10 @@ export async function POST(req: Request) {
   }
 
   const config = mergeConfig(parsed.data.config);
+  const webSearchEnabled = config.sourcesEnabled.includes("web");
+  if (webSearchEnabled && !process.env.EXA_API_KEY) {
+    return new Response("EXA_API_KEY is not configured but web source is enabled.", { status: 400 });
+  }
   const threadId = parsed.data.threadId ?? parsed.data.id;
   const runId = crypto.randomUUID();
   const userMessages = parsed.data.messages.filter(
@@ -143,8 +149,23 @@ export async function POST(req: Request) {
     const streamResult = streamSynthesisText({
       config,
       prompt: buildSynthesisPrompt(synthesisInput),
-      system:
-        "You are a research synthesizer. Never invent sources. If evidence is missing, say unknown explicitly.",
+      stopWhen: webSearchEnabled ? stepCountIs(3) : undefined,
+      system: webSearchEnabled
+        ? "You are a research synthesizer. Use webSearch at most once when current web context materially improves the answer. Keep evidence-packet citations unchanged and clearly separate any web updates with explicit URLs."
+        : "You are a research synthesizer. Never invent sources. If evidence is missing, say unknown explicitly.",
+      tools: webSearchEnabled
+        ? {
+            webSearch: webSearch({
+              contents: {
+                livecrawl: "fallback",
+                summary: true,
+                text: { maxCharacters: 3000 },
+              },
+              numResults: 10,
+              type: "auto",
+            }),
+          }
+        : undefined,
     });
 
     return streamResult.toUIMessageStreamResponse({

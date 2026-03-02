@@ -39,11 +39,15 @@ export function streamSynthesisText(args: {
   system: string;
   prompt: string;
   config: Pick<ResearchRunConfig, "depthPreset" | "model">;
+  tools?: Parameters<typeof streamText>[0]["tools"];
+  stopWhen?: Parameters<typeof streamText>[0]["stopWhen"];
 }) {
   return streamText({
     model: resolveModel(args.config),
     prompt: args.prompt,
     system: args.system,
     temperature: 0.2,
+    tools: args.tools,
+    stopWhen: args.stopWhen,
   });
 }

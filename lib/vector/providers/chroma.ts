@@ -31,11 +31,27 @@ const toChromaMetadata = (jobId: string, metadata: PassageVectorRecord["metadata
   jobId,
   url: metadata.url,
   title: metadata.title ?? "",
+  authors: metadata.authors?.join(" | ") ?? "",
+  published: metadata.published ?? "",
+  updated: metadata.updated ?? "",
+  categories: metadata.categories?.join(" | ") ?? "",
+  documentSummary: metadata.documentSummary ?? "",
   quote: metadata.quote,
   sourceType: metadata.sourceType ?? "",
   locatorKind: metadata.locator.kind,
   locatorValue: metadata.locator.value ?? "",
 });
+
+const splitChromaList = (value: unknown): string[] | undefined => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  const parts = value
+    .split("|")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts : undefined;
+};
 
 const fromChromaMetadata = (metadata: Record<string, unknown>): VectorMetadata | null => {
   if (
@@ -55,6 +71,14 @@ const fromChromaMetadata = (metadata: Record<string, unknown>): VectorMetadata |
     jobId: metadata.jobId,
     url: metadata.url,
     title: typeof metadata.title === "string" && metadata.title ? metadata.title : undefined,
+    authors: splitChromaList(metadata.authors),
+    published: typeof metadata.published === "string" && metadata.published ? metadata.published : undefined,
+    updated: typeof metadata.updated === "string" && metadata.updated ? metadata.updated : undefined,
+    categories: splitChromaList(metadata.categories),
+    documentSummary:
+      typeof metadata.documentSummary === "string" && metadata.documentSummary
+        ? metadata.documentSummary
+        : undefined,
     quote: metadata.quote,
     sourceType:
       typeof metadata.sourceType === "string" && metadata.sourceType

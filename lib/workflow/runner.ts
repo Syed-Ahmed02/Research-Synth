@@ -4,6 +4,7 @@ import { api } from "@/convex/_generated/api";
 import type { ResearchRunConfig, SourceType } from "@/lib/ai/contracts";
 import { generateStructured } from "@/lib/ai/openrouter";
 import { gatherArxivDocuments } from "@/lib/sources/arxiv";
+import { gatherExaDocuments } from "@/lib/sources/exa";
 import { gatherWikipediaDocuments } from "@/lib/sources/wikipedia";
 import type { GatheredDocument } from "@/lib/sources/types";
 import {
@@ -25,6 +26,7 @@ type ClaimRow = {
 
 type DocumentRow = {
   _id: Id<"documents">;
+  metadata?: Record<string, unknown>;
   sourceType: SourceType;
   text: string;
   title?: string;
@@ -96,6 +98,40 @@ const deriveFallbackClaim = (args: { docTitle?: string; passage: string }) => {
   const sentence = normalized.split(/(?<=[.!?])\s+/)[0]?.trim() ?? normalized;
   const capped = sentence.length > 220 ? `${sentence.slice(0, 217)}...` : sentence;
   return args.docTitle ? `${args.docTitle}: ${capped}` : capped;
+};
+
+const asStringArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+};
+
+const asString = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+
+const metadataContextForPrompt = (doc: DocumentRow) => {
+  const metadata = (doc.metadata ?? {}) as Record<string, unknown>;
+  const authors = asStringArray(metadata.authors);
+  const categories = asStringArray(metadata.categories);
+  const published = asString(metadata.published);
+  const updated = asString(metadata.updated);
+  const summary = asString(metadata.summary);
+  const author = asString(metadata.author);
+
+  const lines = [
+    `Source type: ${doc.sourceType}`,
+    `Authors: ${authors.join(", ") || author || "unknown"}`,
+    `Published: ${published ?? "unknown"}`,
+    `Updated: ${updated ?? "unknown"}`,
+    `Categories: ${categories.join(", ") || "unknown"}`,
+  ];
+  if (summary) {
+    lines.push(`Description: ${summary.slice(0, 600)}`);
+  }
+
+  return lines.join("\n");
 };
 
 async function appendEvent(
@@ -192,6 +228,9 @@ async function gatherForSource(args: {
   if (args.source === "arxiv") {
     return gatherArxivDocuments({ maxDocs: args.maxDocs, searchTerms: args.searchTerms });
   }
+  if (args.source === "web") {
+    return gatherExaDocuments({ maxDocs: args.maxDocs, searchTerms: args.searchTerms });
+  }
   return [];
 }
 
@@ -227,7 +266,7 @@ async function runGatherStage(args: {
         jobId: args.jobId,
         level: source === "wikipedia" || source === "arxiv" ? "warn" : "info",
         message:
-          source === "wikipedia" || source === "arxiv"
+          source === "wikipedia" || source === "arxiv" || source === "web"
             ? stageMessage("gather", `no documents found for ${source}`)
             : stageMessage("gather", `source not yet implemented: ${source}`),
         runId: args.runId,
@@ -303,6 +342,8 @@ async function runExtractStage(args: {
       prompt: `Question: ${args.question}
 Document title: ${doc.title ?? "Untitled"}
 Document URL: ${doc.url}
+Document metadata:
+${metadataContextForPrompt(doc)}
 Document text:
 ${doc.text.slice(0, 9000)}
 
@@ -579,6 +620,21 @@ export async function runWorkflowUntilSynthesis(args: {
     runId: args.runId,
     threadId: args.threadId,
   });
+  try {
+    await args.convex.action(api.retrieval.backfillPassagesForJob, {
+      jobId: args.jobId,
+    });
+  } catch (error) {
+    await appendEvent(args.convex, {
+      jobId: args.jobId,
+      level: "warn",
+      message: stageMessage("extract", "vector indexing skipped"),
+      payload: { error: error instanceof Error ? error.message : "unknown indexing error" },
+      runId: args.runId,
+      stage: "extract",
+      threadId: args.threadId,
+    });
+  }
   await runCritiqueStage({
     config: args.config,
     convex: args.convex,

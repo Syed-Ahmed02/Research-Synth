@@ -8,6 +8,11 @@ export type VectorMetadata = {
   jobId: string;
   url: string;
   title?: string;
+  authors?: string[];
+  published?: string;
+  updated?: string;
+  categories?: string[];
+  documentSummary?: string;
   quote: string;
   locator: Locator;
   sourceType?: "wikipedia" | "arxiv" | "news" | "gov" | "web";
