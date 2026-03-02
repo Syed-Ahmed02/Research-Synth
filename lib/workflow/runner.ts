@@ -54,6 +54,50 @@ const normalizeLimits = (config: ResearchRunConfig, plannedMaxDocs?: number, pla
   ),
 });
 
+const splitIntoCandidatePassages = (text: string, maxPassages: number) => {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 80);
+  if (paragraphs.length > 0) {
+    return paragraphs.slice(0, maxPassages);
+  }
+
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 40);
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    const candidate = current ? `${current} ${sentence}` : sentence;
+    if (candidate.length <= 500) {
+      current = candidate;
+      continue;
+    }
+    if (current.length > 0) {
+      chunks.push(current);
+    }
+    current = sentence;
+    if (chunks.length >= maxPassages) {
+      break;
+    }
+  }
+  if (current.length > 0 && chunks.length < maxPassages) {
+    chunks.push(current);
+  }
+
+  return chunks.slice(0, maxPassages);
+};
+
+const deriveFallbackClaim = (args: { docTitle?: string; passage: string }) => {
+  const normalized = args.passage.replaceAll(/\s+/g, " ").trim();
+  const sentence = normalized.split(/(?<=[.!?])\s+/)[0]?.trim() ?? normalized;
+  const capped = sentence.length > 220 ? `${sentence.slice(0, 217)}...` : sentence;
+  return args.docTitle ? `${args.docTitle}: ${capped}` : capped;
+};
+
 async function appendEvent(
   convex: ConvexHttpClient,
   args: {
@@ -271,7 +315,16 @@ Extract high-signal passages and concise claims relevant to the question.`,
       passages: [],
     }));
 
-    const passages = extraction.passages.slice(0, args.limits.maxPassagesPerDoc);
+    const modelPassages = extraction.passages.slice(0, args.limits.maxPassagesPerDoc);
+    const passages =
+      modelPassages.length > 0
+        ? modelPassages
+        : splitIntoCandidatePassages(doc.text, args.limits.maxPassagesPerDoc).map((text) => ({
+            locatorKind: "unknown" as const,
+            locatorValue: "fallback",
+            relevanceScore: 0.35,
+            text,
+          }));
     if (passages.length > 0) {
       await args.convex.mutation(api.artifacts.createPassages, {
         documentId: doc._id,
@@ -285,7 +338,13 @@ Extract high-signal passages and concise claims relevant to the question.`,
       passagesCreated += passages.length;
     }
 
-    const claims = extraction.claims.slice(0, args.config.limits.maxClaims ?? 8);
+    const modelClaims = extraction.claims.slice(0, args.config.limits.maxClaims ?? 8);
+    const claims =
+      modelClaims.length > 0
+        ? modelClaims
+        : passages.length > 0
+          ? [deriveFallbackClaim({ docTitle: doc.title, passage: passages[0].text })]
+          : [];
     for (const claim of claims) {
       await args.convex.mutation(api.artifacts.upsertClaim, {
         claim,
@@ -293,6 +352,27 @@ Extract high-signal passages and concise claims relevant to the question.`,
         status: "unknown",
       });
       claimsCreated += 1;
+    }
+  }
+
+  if (claimsCreated === 0 && selectedDocs.length > 0) {
+    const fallbackDoc = selectedDocs[0];
+    const fallbackPassage = splitIntoCandidatePassages(fallbackDoc.text, 1)[0];
+    if (fallbackPassage) {
+      await args.convex.mutation(api.artifacts.upsertClaim, {
+        claim: deriveFallbackClaim({ docTitle: fallbackDoc.title, passage: fallbackPassage }),
+        jobId: args.jobId,
+        status: "unknown",
+      });
+      claimsCreated = 1;
+      await appendEvent(args.convex, {
+        jobId: args.jobId,
+        level: "warn",
+        message: stageMessage("extract", "model returned no claims; injected fallback claim"),
+        runId: args.runId,
+        stage: "extract",
+        threadId: args.threadId,
+      });
     }
   }
 

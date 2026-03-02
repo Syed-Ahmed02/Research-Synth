@@ -2,7 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { useQuery } from "convex/react";
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 
 import { api } from "@/convex/_generated/api";
 import type { DepthPreset, SourceType } from "@/lib/ai/contracts";
@@ -56,8 +56,11 @@ export function ResearchChat() {
   const [config, setConfig] = useState<ChatConfig>(defaultConfig);
 
   const { id, messages, sendMessage, status } = useChat();
-  const latestJobs = useQuery(api.jobs.listJobs, { limit: 1, threadId: id });
-  const job = latestJobs?.[0];
+  const latestJobs = useQuery(api.jobs.listJobs, { limit: 50 });
+  const job = useMemo(
+    () => latestJobs?.find((candidate) => candidate.threadId === id),
+    [id, latestJobs],
+  );
   const events = useQuery(
     api.jobs.listJobEvents,
     job ? { jobId: job._id, limit: 120 } : "skip",
