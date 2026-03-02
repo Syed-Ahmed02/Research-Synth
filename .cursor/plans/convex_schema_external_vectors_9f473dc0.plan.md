@@ -1,6 +1,6 @@
 ---
 name: Convex Schema External Vectors
-overview: Revise the Convex schema plan so retrieval uses an external vector backend (managed cloud vector DB or ChromaDB), while preserving Convex for canonical metadata/artifacts and aligning data contracts with AI Elements UI components.
+overview: Revise the Convex schema plan so retrieval uses an external vector backend (managed cloud vector DB or ChromaDB), while preserving Convex for canonical metadata/artifacts in a chat-first streaming UX aligned with AI Elements contracts.
 todos:
   - id: revise-schema-for-external-vectors
     content: Update Convex table design to store external vector linkage/status fields and keep metadata indexes only.
@@ -26,8 +26,8 @@ isProject: false
 
 Define a durable, query-friendly Convex schema that supports:
 
-- Long-running, multi-stage research jobs
-- Real-time progress/event streaming to the UI
+- Long-running, multi-stage research runs initiated from chat
+- Real-time progress/event streaming into a chat timeline
 - Artifact persistence (documents -> passages -> claims -> citations -> report)
 - Strict citation guardrails (no report claim without stored evidence)
 
@@ -63,6 +63,10 @@ And update retrieval architecture so semantic search **does not use Convex built
 
 - **Fields** (suggested):
   - `question: string`
+  - `threadId?: string` (chat thread/session grouping)
+  - `promptMessageId?: string` (user message that initiated the run)
+  - `assistantMessageId?: string` (streamed assistant message anchor)
+  - `runId?: string` (idempotency/retry correlation)
   - `status: "queued" | "running" | "succeeded" | "failed" | "cancelled"`
   - `currentStage: StageName` (see Shared types)
   - `config`: `{ depthPreset, sourcesEnabled, model, limits }`
@@ -73,6 +77,7 @@ And update retrieval architecture so semantic search **does not use Convex built
   - by `status`
   - by `createdAt` (for history)
   - by `ownerId + createdAt` (if multi-user)
+  - by `threadId + createdAt` (chat hydration order)
 - **Notes**:
   - keep config minimal but explicit; avoid free-form JSON blobs that you cannot query.
 
@@ -82,6 +87,8 @@ And update retrieval architecture so semantic search **does not use Convex built
 
 - **Fields**:
   - `jobId: Id<"researchJobs">`
+  - `threadId?: string`
+  - `runId?: string`
   - `ts: number`
   - `stage: StageName`
   - `level: "debug" | "info" | "warn" | "error"`
@@ -90,6 +97,7 @@ And update retrieval architecture so semantic search **does not use Convex built
 - **Indexes**:
   - by `jobId + ts` (primary feed)
   - by `jobId + stage + ts` (stage filter)
+  - by `threadId + ts` (chat timeline query)
 - **Retention**:
   - optional pruning policy later; MVP can keep all events.
 - **External retrieval events**:
@@ -246,13 +254,13 @@ Because the UI currently centers on AI Elements primitives, retrieval responses 
 
 ## Query patterns to support UI
 
-- **History**: list jobs ordered by `createdAt` (optionally filtered by owner)
-- **Run page**:
-  - job header (`status/currentStage`)
-  - event feed (`jobId + ts`)
-  - docs list (`jobId`)
-  - claims list (`jobId`, optionally by status)
-- **Report page**:
+- **Chat home (primary)**:
+  - hydrate thread runs (`threadId + createdAt`)
+  - merge stream-aware event feed (`threadId + ts` and `jobId + ts`)
+  - inline artifacts by active `jobId`
+- **History (secondary)**:
+  - list threads/runs ordered by `createdAt` (optionally filtered by owner)
+- **Report drill-down (secondary)**:
   - report by `jobId`
   - citations by `claimId` (for evidence drawer)
 - **Retrieval-aware views**:
@@ -301,10 +309,10 @@ Add startup validation that fails fast when selected provider env vars are missi
 
 ## Rollout strategy
 
-1. Implement schema + adapter layer with provider flag.
+1. Implement schema + adapter layer with provider flag and chat linkage fields.
 2. Default local/dev to ChromaDB; staging/prod to managed cloud provider.
 3. Add backfill action to index existing passages.
-4. Switch retrieval stage to external providers; keep old API surface stable for UI.
+4. Switch retrieval stage to external providers and expose chat-hydration queries.
 5. Validate claim→citation traceability end-to-end.
 
 ## Migration strategy

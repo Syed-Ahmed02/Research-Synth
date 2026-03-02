@@ -6,6 +6,20 @@ export type StageName =
   | "cross_validate"
   | "synthesize";
 
+export type SourceType = "wikipedia" | "arxiv" | "news" | "gov" | "web";
+export type DepthPreset = "fast" | "standard" | "deep";
+
+export type ResearchRunConfig = {
+  depthPreset: DepthPreset;
+  sourcesEnabled: SourceType[];
+  model: string;
+  limits: {
+    maxDocs: number;
+    maxPassagesPerDoc: number;
+    maxClaims?: number;
+  };
+};
+
 export type LocatorKind = "section" | "offset" | "page" | "unknown";
 
 export type Locator = {
@@ -21,7 +35,7 @@ export type EvidenceItem = {
   quote: string;
   locator: Locator;
   score: number;
-  sourceType?: "wikipedia" | "arxiv" | "news" | "gov" | "web";
+  sourceType?: SourceType;
 };
 
 export type ClaimEvidenceStatus = "supported" | "contested" | "unknown";

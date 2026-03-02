@@ -2,11 +2,10 @@
 
 import { v } from "convex/values";
 import { action } from "./_generated/server";
+import { api } from "./_generated/api";
 import { getVectorProvider, getVectorRuntimeConfig, namespaceForJob } from "../lib/vector";
 import type { EvidenceItem, Locator } from "../lib/ai/contracts";
 import type { PassageVectorRecord, QuerySimilarFilters } from "../lib/vector/types";
-
-const fn = (name: string) => name as any;
 
 const sourceTypeValidator = v.union(
   v.literal("wikipedia"),
@@ -85,12 +84,12 @@ export const backfillPassagesForJob = action({
   handler: async (ctx, args): Promise<{ upsertedCount: number; attemptedCount: number }> => {
     const provider = getVectorProvider();
     const namespace = namespaceForJob(args.jobId);
-    const passages = await ctx.runQuery(fn("artifacts:getPassagesForJob"), {
+    const passages = await ctx.runQuery(api.artifacts.getPassagesForJob, {
       jobId: args.jobId,
       limit: args.limit ?? 500,
       embeddingStatus: args.forceReindex ? undefined : "pending",
     });
-    const documents = await ctx.runQuery(fn("artifacts:listDocumentsByJob"), {
+    const documents = await ctx.runQuery(api.artifacts.listDocumentsByJob, {
       jobId: args.jobId,
     });
 
@@ -99,7 +98,7 @@ export const backfillPassagesForJob = action({
       docsById.set(doc._id, doc);
     }
 
-    await ctx.runMutation(fn("jobs:appendEvent"), {
+    await ctx.runMutation(api.jobs.appendEvent, {
       jobId: args.jobId,
       stage: "extract",
       level: "info",
@@ -110,9 +109,13 @@ export const backfillPassagesForJob = action({
     let upserted = 0;
     for (const passage of passages) {
       try {
+        if (!args.forceReindex && passage.externalVectorId) {
+          continue;
+        }
+
         const doc = docsById.get(passage.documentId);
         if (!doc?.url) {
-          await ctx.runMutation(fn("artifacts:markPassageIndexFailed"), {
+          await ctx.runMutation(api.artifacts.markPassageIndexFailed, {
             passageId: passage._id,
           });
           continue;
@@ -135,7 +138,7 @@ export const backfillPassagesForJob = action({
           records: [record],
         });
 
-        await ctx.runMutation(fn("artifacts:markPassageIndexed"), {
+        await ctx.runMutation(api.artifacts.markPassageIndexed, {
           passageId: passage._id,
           vectorProvider: provider.provider,
           vectorNamespace: namespace,
@@ -143,13 +146,13 @@ export const backfillPassagesForJob = action({
         });
         upserted += 1;
       } catch {
-        await ctx.runMutation(fn("artifacts:markPassageIndexFailed"), {
+        await ctx.runMutation(api.artifacts.markPassageIndexFailed, {
           passageId: passage._id,
         });
       }
     }
 
-    await ctx.runMutation(fn("jobs:appendEvent"), {
+    await ctx.runMutation(api.jobs.appendEvent, {
       jobId: args.jobId,
       stage: "extract",
       level: "info",
@@ -205,7 +208,7 @@ export const retrievePassages = action({
       sourceType: hit.metadata.sourceType,
     }));
 
-    await ctx.runMutation(fn("jobs:appendEvent"), {
+    await ctx.runMutation(api.jobs.appendEvent, {
       jobId: args.jobId,
       stage: "synthesize",
       level: "debug",

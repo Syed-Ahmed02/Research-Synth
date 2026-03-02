@@ -1,6 +1,6 @@
 ---
 name: Minimal Nextjs + Convex Synthesizer
-overview: "Minimal-stack multi-agent research synthesizer: a Next.js app using Vercel AI SDK (optionally Mastra) for multi-step agent orchestration and OpenRouter for models, with Convex as the only database + realtime layer for jobs, sources, and cited reports."
+overview: "Minimal-stack chat-first research synthesizer: Next.js chat route + Vercel AI SDK streaming for primary UX, with Convex as durable realtime storage for runs, stage events, artifacts, and cited outputs."
 todos:
   - id: scaffold-nextjs-convex
     content: Create Next.js app (App Router) + Convex project with schema for jobs/events/documents/passages/claims/citations/reports.
@@ -12,10 +12,10 @@ todos:
     content: Implement Wikipedia and arXiv fetchers; normalize/store documents and emit progress events.
     status: pending
   - id: workflow-stages
-    content: Implement planner → gather → extract → synthesize pipeline as Convex action(s) with durable stage persistence.
+    content: Implement planner → gather → extract → critique → cross_validate → synthesize pipeline with Next.js chat-primary orchestration and durable Convex persistence.
     status: pending
-  - id: ui-progress-report
-    content: Build New/Run/Report/History pages; use Convex subscriptions for live progress and report viewing.
+  - id: ui-chat-first
+    content: Build a chat-first home UI with token streaming and in-chat stage/artifact updates; keep report/history as secondary views.
     status: pending
   - id: critique-crossvalidate
     content: Add critic + cross-validator stages; store claims + evidence map and enforce citation guardrails.
@@ -27,34 +27,31 @@ isProject: false
 
 - **App**: Next.js (App Router) deployed to Vercel.
 - **LLM/agents**: Vercel AI SDK (`ai`) calling **OpenRouter** (OpenAI-compatible).
-- **Orchestration**: simple step-based workflow in TypeScript 
+- **Orchestration**: chat-primary step workflow in TypeScript.
 - **Database + realtime**: **Convex** (tables + actions + queries + subscriptions).
 
 ## Core idea
 
-- A **Research Job** is a durable record in Convex.
-- A job progresses through deterministic **stages** (plan → gather → extract → critique → cross-validate → synthesize).
-- Each stage writes **events** (for UI progress) and **artifacts** (documents, passages, claims, report).
+- A **Research Run** starts from a chat message and is durably recorded in Convex.
+- A run progresses through deterministic **stages** (plan → gather → extract → critique → cross_validate → synthesize).
+- Each stage writes **events** (for live chat progress) and **artifacts** (documents, passages, claims, report).
 - The final report is generated only from stored artifacts, ensuring **no invented citations**.
 
 ```mermaid
 flowchart TD
-  user[User] --> web[Nextjs_UI]
-  web --> api[Nextjs_RouteHandler]
-  api --> convexAction[Convex_Action_runJob]
-
-  convexAction --> plan[Planner_Step]
+  user[User] --> web[Nextjs_Chat_UI]
+  web --> api[Nextjs_API_chat]
+  api --> plan[Planner_Step]
   plan --> gather[Gather_Steps]
   gather --> extract[Extraction_Step]
   extract --> critique[Critic_Step]
   critique --> xval[CrossValidate_Step]
   xval --> synth[Synthesizer_Step]
-
-  convexAction --> db[(Convex_DB)]
+  synth --> stream[Token_Stream]
+  api --> db[(Convex_DB)]
   web <-->|subscriptions| db
-
-  convexAction --> llm[OpenRouter_via_Vercel_AI_SDK]
-  convexAction --> sources[Public_APIs(arXiv/Wikipedia/News/Gov)]
+  api --> llm[OpenRouter_via_Vercel_AI_SDK]
+  api --> sources[Public_APIs(arXiv/Wikipedia/News/Gov)]
 ```
 
 
@@ -92,33 +89,31 @@ flowchart TD
 - For each citation, require a **verbatim quote/snippet** stored in `citations.quote`.
 - If a claim cannot be cited, it must be labeled **unknown** or removed.
 
-## UI pages (MVP)
+## UI surfaces (MVP)
 
-- **New research**: question + depth + source toggles + model choice
-- **Run**: live progress feed (Convex subscription to `jobEvents`) + intermediate artifacts
-- **Report**: rendered Markdown + evidence drawer showing quotes and source links
-- **History**: list of prior jobs
+- **Chat home (primary)**: prompt + token stream + in-chat stage/artifact cards
+- **Report (secondary)**: rendered Markdown + evidence drawer showing quotes and source links
+- **History (secondary)**: list of chat threads/runs
 
 ## Suggested repo layout (single app)
 
 - `[app](app)`: Next.js routes and pages
-- `[app/api/research](app/api/research)`: route handler to create/start jobs
+- `[app/api/chat](app/api/chat)`: primary stream + orchestration route
 - `[convex/schema.ts](convex/schema.ts)`: tables
-- `[convex/jobs.ts](convex/jobs.ts)`: mutations/queries for jobs and events
-- `[convex/runResearch.ts](convex/runResearch.ts)`: action(s) that run workflow stages
+- `[convex/jobs.ts](convex/jobs.ts)`: mutations/queries for runs and events
 - `[lib/ai](lib/ai)`: Vercel AI SDK client + model registry (OpenRouter)
 - `[lib/sources](lib/sources)`: arXiv + Wikipedia connectors
 - `[lib/workflow](lib/workflow)`: step functions and Zod schemas for structured outputs
 
 ## Operational suggestions (still minimal)
 
-- **Long-running jobs**: keep each stage bounded; persist stage outputs; if runtime limits bite, split into multiple Convex action invocations triggered via Convex scheduling.
+- **Long-running runs**: keep each stage bounded; persist outputs continuously; if runtime limits bite, split into Convex scheduled stage jobs while keeping `/api/chat` as the UX entrypoint.
 - **Model outputs**: use structured output (Zod) for `plan`, `claims`, and `citations` to reduce flakiness.
 - **Cost control**: cap docs/passages; add a “fast/standard/deep” preset.
 
 ## Milestones
 
-1. End-to-end MVP: Wikipedia + arXiv → cited report in UI.
+1. End-to-end MVP: chat prompt -> token streaming -> cited report backed by Convex artifacts.
 2. Add critic + cross-validation + claim statuses.
 3. Add news + gov dataset connectors + dedup/rate-limiting.
 4. Add exports (Markdown/JSON; PDF later).

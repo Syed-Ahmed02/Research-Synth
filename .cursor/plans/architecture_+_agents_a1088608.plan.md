@@ -1,12 +1,12 @@
 ---
 name: Architecture + Agents
-overview: "Define the end-to-end architecture and multi-stage agent workflow: Next.js entrypoints, Convex actions/queries, durable stage state, structured LLM outputs via Vercel AI SDK/OpenRouter, and the responsibilities/contracts of each agent step (planner/gather/extract/critic/xval/synthesize)."
+overview: "Define the end-to-end architecture and multi-stage agent workflow with a chat-first runtime: Next.js chat route for primary streaming UX, Convex for durable state/artifacts, and structured stage contracts for planner/gather/extract/critic/xval/synthesize."
 todos:
   - id: arch-entrypoints
-    content: Define the Next.js entrypoints for creating and starting jobs (UI → Convex mutation, then route handler → Convex action), and document the request/response shape.
+    content: Define chat-first entrypoints (UI chat page -> `/api/chat`) and run lifecycle write-through to Convex with clear request/response contracts.
     status: pending
   - id: arch-workflow-runner
-    content: Design the Convex action workflow runner (single-action MVP) with a clear stage state machine, durable writes, and event emission at consistent checkpoints.
+    content: Design a Next.js chat-primary runner that streams tokens in real time while persisting stage state/events/artifacts to Convex.
     status: pending
   - id: arch-stage-contracts
     content: Define Zod schemas and TypeScript contracts for each stage’s structured inputs/outputs (plan/gather/extract/critique/xval/synthesize).
@@ -26,9 +26,9 @@ isProject: false
 
 Document and implement the overall system architecture for a minimal-stack research synthesizer:
 
-- Next.js UI to create and view research jobs
+- Next.js chat-first UI for creating and observing research runs
 - Convex as the only database + realtime layer
-- A durable multi-stage workflow runner (agents/steps)
+- A chat-primary, durable multi-stage workflow runner (agents/steps)
 - Vercel AI SDK calling OpenRouter for models
 - End-to-end citation guardrails (no invented sources)
 
@@ -36,22 +36,19 @@ Document and implement the overall system architecture for a minimal-stack resea
 
 ```mermaid
 flowchart TD
-  user[User] --> ui[Nextjs_UI]
-  ui --> createJob[Convex_Mutation_createJob]
-  ui --> startJob[Nextjs_RouteHandler_startJob]
-  startJob --> runAction[Convex_Action_runResearchJob]
-
-  runAction --> stagePlan[Stage_plan]
+  user[User] --> ui[Nextjs_Chat_UI]
+  ui --> chatApi[Nextjs_API_chat]
+  chatApi --> createJob[Convex_Mutation_createJob]
+  chatApi --> stagePlan[Stage_plan]
   stagePlan --> stageGather[Stage_gather]
   stageGather --> stageExtract[Stage_extract]
   stageExtract --> stageCritique[Stage_critique]
   stageCritique --> stageXval[Stage_cross_validate]
   stageXval --> stageSynth[Stage_synthesize]
-
-  runAction --> db[(Convex_DB)]
+  stageSynth --> tokenStream[Token_Stream_to_UI]
+  chatApi --> db[(Convex_DB)]
   ui <-->|subscriptions| db
-
-  runAction --> llm[OpenRouter_via_Vercel_AI_SDK]
+  chatApi --> llm[OpenRouter_via_Vercel_AI_SDK]
   stageGather --> extApis[Public_APIs]
 ```
 
@@ -61,14 +58,16 @@ flowchart TD
 
 ### Next.js app
 
-- **UI pages** subscribe to Convex for live updates and read-only artifact viewing.
-- **Route handlers** (server-side) are used only when needed for:
-  - starting a job securely
+- **Chat page** is the primary UX surface and subscribes to Convex for durable updates.
+- **Chat route handler** is the primary runtime for:
+  - starting/continuing research runs
+  - streaming token output to the UI
   - hiding provider keys (OpenRouter)
-  - returning immediate acknowledgements for long jobs
+  - persisting stage/events/artifacts to Convex during streaming
 - Suggested entrypoints:
-  - `[app/api/research/start/route.ts](app/api/research/start/route.ts)` start/run a job
-  - UI pages: `[app/jobs/[jobId]/page.tsx](app/jobs/[jobId]/page.tsx)` and report/history
+  - `[app/api/chat/route.ts](app/api/chat/route.ts)` primary stream + orchestration endpoint
+  - `[app/page.tsx](app/page.tsx)` chat-first UI
+  - report/history routes as secondary drill-downs
 
 ### Convex
 
@@ -104,10 +103,9 @@ Each stage:
 
 ### Execution model
 
-- **MVP**: one Convex action `runResearchJob(jobId)` that runs stages sequentially.
-- **Scale-up** (if time limits appear): split into stage actions and chain them via Convex scheduling:
-  - `runStage(jobId, stage)`
-  - schedule next stage on completion
+- **MVP**: one Next.js chat request orchestrates the stage sequence and streams synthesis tokens.
+- **Durability**: each stage writes to Convex as it executes so reconnects/reloads remain correct.
+- **Scale-up** (if time limits appear): stage-level Convex scheduled jobs become the background executor while `/api/chat` remains the UX stream coordinator.
 
 ### Idempotency and re-runs
 
@@ -191,6 +189,7 @@ Each stage:
 ## Observability and debuggability
 
 - `jobEvents` is the single source for progress.
+- Stream trace IDs should map token stream events to durable `jobEvents` for diagnosis.
 - Ensure consistent event shapes per stage:
   - stage start/finish
   - counts (docs/passages/claims/citations)
@@ -203,17 +202,18 @@ Each stage:
   - `[components](components)` UI components
 - Convex:
   - `[convex/schema.ts](convex/schema.ts)`
-  - `[convex/runResearch.ts](convex/runResearch.ts)` main action
   - `[convex/jobs.ts](convex/jobs.ts)` job/event queries/mutations
 - Workflow:
+  - `[app/api/chat/route.ts](app/api/chat/route.ts)` stream transport + orchestration entrypoint
   - `[lib/workflow](lib/workflow)` stage functions + Zod schemas
   - `[lib/sources](lib/sources)` connectors (wikipedia/arxiv)
   - `[lib/ai](lib/ai)` model registry + structured generation helpers
 
 ## Test plan (manual, end-to-end)
 
-- Start a job and watch stages advance in order.
+- Send a new research chat prompt and verify token stream begins immediately.
+- Verify stages advance in order and are durably persisted in Convex.
 - Confirm documents/passages/claims/citations are persisted and queryable.
 - Confirm report cites only stored citations; remove citations and ensure synth fails closed.
-- Confirm rerun behavior doesn’t create runaway duplicates.
+- Confirm refresh/reconnect preserves run state and no duplicate runs are created.
 

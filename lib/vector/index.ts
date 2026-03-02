@@ -10,6 +10,14 @@ const requireEnv = (name: string): string => {
   return value;
 };
 
+const optionalEnv = (name: string): string | undefined => {
+  const value = process.env[name];
+  if (!value || value.trim().length === 0) {
+    return undefined;
+  }
+  return value;
+};
+
 const getProviderFromEnv = (): VectorProvider => {
   const value = process.env.VECTOR_PROVIDER ?? "chroma";
   if (value !== "cloud" && value !== "chroma") {
@@ -35,10 +43,13 @@ export const validateVectorConfig = (): VectorRuntimeConfig => {
   }
 
   if (config.provider === "chroma") {
-    requireEnv("CHROMA_API_KEY");
-    requireEnv("CHROMA_TENANT");
-    requireEnv("CHROMA_DATABASE");
     requireEnv("CHROMA_COLLECTION");
+    const chromaUrl = optionalEnv("CHROMA_URL");
+    if (!chromaUrl) {
+      requireEnv("CHROMA_API_KEY");
+      requireEnv("CHROMA_TENANT");
+      requireEnv("CHROMA_DATABASE");
+    }
   } else {
     requireEnv("CLOUD_VECTOR_URL");
     requireEnv("CLOUD_VECTOR_INDEX");
@@ -64,9 +75,10 @@ export const getVectorProvider = (): VectorAdapter => {
 
   if (config.provider === "chroma") {
     providerInstance = createChromaProvider({
-      apiKey: requireEnv("CHROMA_API_KEY"),
-      tenant: requireEnv("CHROMA_TENANT"),
-      database: requireEnv("CHROMA_DATABASE"),
+      url: optionalEnv("CHROMA_URL"),
+      apiKey: optionalEnv("CHROMA_API_KEY"),
+      tenant: optionalEnv("CHROMA_TENANT"),
+      database: optionalEnv("CHROMA_DATABASE"),
       collection: requireEnv("CHROMA_COLLECTION"),
     });
     return providerInstance;
