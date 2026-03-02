@@ -266,7 +266,7 @@ export const EnvironmentVariableCopyButton = ({
   const { name, value } = useContext(EnvironmentVariableContext);
 
   const getTextToCopy = useCallback((): string => {
-    const formatMap = {
+    const formatMap: Record<"name" | "value" | "export", () => string> = {
       export: () => `export ${name}="${value}"`,
       name: () => name,
       value: () => value,
