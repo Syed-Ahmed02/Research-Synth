@@ -1,5 +1,6 @@
 import { ConvexHttpClient } from "convex/browser";
 import { stepCountIs } from "ai";
+import type { ModelMessage } from "ai";
 import { webSearch } from "@exalabs/ai-sdk";
 import { streamSynthesisText } from "@/lib/ai/openrouter";
 import { api } from "@/convex/_generated/api";
@@ -33,13 +34,34 @@ const DEFAULT_CONFIG: ResearchRunConfig = {
     maxDocs: 8,
     maxPassagesPerDoc: 4,
   },
-  model: "anthropic/claude-3.5-sonnet",
+  model: "anthropic/claude-opus-4.6",
   sourcesEnabled: ["wikipedia", "arxiv"],
 };
 
 const extractMessageText = (message: unknown) => {
   if (!message || typeof message !== "object") {
     return "";
+  }
+
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (!part || typeof part !== "object") {
+          return "";
+        }
+        if ((part as { type?: unknown }).type !== "text") {
+          return "";
+        }
+        return typeof (part as { text?: unknown }).text === "string"
+          ? (part as { text: string }).text
+          : "";
+      })
+      .filter(Boolean)
+      .join("\n");
   }
 
   const parts = (message as { parts?: unknown }).parts;
@@ -71,6 +93,31 @@ const mergeConfig = (config?: Partial<ResearchRunConfig>): ResearchRunConfig => 
 });
 
 const extractAssistantText = (responseMessage: unknown) => extractMessageText(responseMessage);
+const MEMORY_WINDOW_SIZE = 24;
+
+const modelMessagesFromStoredHistory = (
+  messages: Array<{ role: string; text: string }>,
+): ModelMessage[] => {
+  const modelMessages: ModelMessage[] = [];
+  for (const message of messages) {
+    const text = message.text?.trim();
+    if (!text) {
+      continue;
+    }
+    if (message.role === "user") {
+      modelMessages.push({ role: "user", content: [{ type: "text", text }] });
+      continue;
+    }
+    if (message.role === "assistant") {
+      modelMessages.push({ role: "assistant", content: [{ type: "text", text }] });
+      continue;
+    }
+    if (message.role === "system") {
+      modelMessages.push({ role: "system", content: text });
+    }
+  }
+  return modelMessages;
+};
 
 const extractResourcesFromMarkdown = (markdown: string) => {
   const resources: Array<{ url: string; title?: string }> = [];
@@ -94,14 +141,12 @@ const extractResourcesFromMarkdown = (markdown: string) => {
   return resources;
 };
 
-const conversationContextFromMessages = (messages: unknown[]) => {
+const conversationContextFromModelMessages = (messages: ModelMessage[]) => {
   const lines: string[] = [];
   for (const message of messages.slice(-8)) {
-    if (!message || typeof message !== "object") continue;
-    const role = typeof (message as { role?: unknown }).role === "string" ? (message as { role: string }).role : "unknown";
     const text = extractMessageText(message).trim();
     if (!text) continue;
-    lines.push(`${role.toUpperCase()}: ${text}`);
+    lines.push(`${message.role.toUpperCase()}: ${text}`);
   }
   return lines.join("\n");
 };
@@ -125,7 +170,7 @@ export async function POST(req: Request) {
   }
 
   const config = mergeConfig(parsed.data.config);
-  const threadId = parsed.data.threadId ?? parsed.data.id;
+  const threadId = parsed.data.threadId ?? parsed.data.id ?? crypto.randomUUID();
   const runId = crypto.randomUUID();
   const userMessages = parsed.data.messages.filter(
     (message) => message && typeof message === "object" && (message as { role?: string }).role === "user",
@@ -136,11 +181,31 @@ export async function POST(req: Request) {
     return new Response("Please send a user question.", { status: 400 });
   }
 
+  const convex = new ConvexHttpClient(convexUrl);
+  await convex.mutation(api.chat.upsertSession, {
+    threadId,
+  });
+  const promptMessageId = await convex.mutation(api.chat.appendMessage, {
+    threadId,
+    role: "user",
+    text: question,
+    parts:
+      lastUser && typeof lastUser === "object"
+        ? (lastUser as { parts?: unknown }).parts
+        : undefined,
+    runId,
+  });
+  const memoryMessages = await convex.query(api.chat.listMessagesByThread, {
+    threadId,
+    limit: MEMORY_WINDOW_SIZE,
+  });
+  const modelMessages = modelMessagesFromStoredHistory(memoryMessages);
+
   // If the question is vague, ask follow-ups and don't start searching yet.
   const clarification = await decideClarification({
     config,
     question,
-    conversationContext: conversationContextFromMessages(parsed.data.messages),
+    conversationContext: conversationContextFromModelMessages(modelMessages),
   });
   if (clarification.decision === "clarify") {
     const followUps = clarification.followUpQuestions ?? [];
@@ -158,10 +223,21 @@ export async function POST(req: Request) {
 
     return streamResult.toUIMessageStreamResponse({
       onError: () => "Failed to ask clarifying questions.",
+      onFinish: async ({ responseMessage }) => {
+        const assistantText = extractAssistantText(responseMessage).trim();
+        if (!assistantText) {
+          return;
+        }
+        await convex.mutation(api.chat.appendMessage, {
+          threadId,
+          role: "assistant",
+          text: assistantText,
+          runId,
+        });
+      },
     });
   }
 
-  const convex = new ConvexHttpClient(convexUrl);
   let jobId: Id<"researchJobs"> | undefined;
 
   try {
@@ -170,13 +246,30 @@ export async function POST(req: Request) {
       question: clarification.refinedQuestion ?? question,
       runId,
       threadId,
+      promptMessageId: String(promptMessageId),
     });
     const refinedQuestion = clarification.refinedQuestion ?? question;
+    const trimmedModelHistory = modelMessages.slice(-MEMORY_WINDOW_SIZE);
+    const finalUserText =
+      refinedQuestion === question
+        ? question
+        : `${question}\n\nRefined request:\n${refinedQuestion}`;
+    const synthesisMessages =
+      trimmedModelHistory.length > 0 &&
+      trimmedModelHistory[trimmedModelHistory.length - 1]?.role === "user"
+        ? [
+            ...trimmedModelHistory.slice(0, -1),
+            { role: "user", content: [{ type: "text", text: finalUserText }] } as ModelMessage,
+          ]
+        : [
+            ...trimmedModelHistory,
+            { role: "user", content: [{ type: "text", text: finalUserText }] } as ModelMessage,
+          ];
 
     const streamResult = streamSynthesisText({
       config,
       system:
-        "You are a research assistant. First, use the webSearch tool to find relevant arXiv resources for the question.\n\nRules:\n- Use webSearch once.\n- Your search query MUST restrict to arXiv (use site:arxiv.org).\n- Use ONLY the webSearch results. Do not invent sources or URLs.\n- Output markdown with: ## Summary, ## Resources, ## Limits & Unknowns.\n- In ## Resources, include a ranked bullet list of markdown links, each with a 1-line note.\n- If no relevant arXiv results are found, say so and ask a clarifying question.",
+        "You are a research assistant. First, use the webSearch tool to find relevant arXiv resources for the question.\n\nRules:\n- Use webSearch once.\n- Your search query MUST restrict to arXiv (use site:arxiv.org).\n- Use ONLY the webSearch results. Do not invent sources or URLs.\n\nOutput markdown in this order:\n\n1) **## Executive Summary** (about 300 words)\n   - In the first 1–2 sentences, state what is happening: what research question was asked and what you did (e.g. searched arXiv and synthesized findings).\n   - Then give a clear, direct answer to the research question(s), with key findings and takeaways in about 300 words total. Use plain language; include the main conclusions and how the sources support them.\n\n2) **## Summary** (optional short recap if needed)\n   - Brief recap of the answer and context.\n\n3) **## Resources**\n   - A ranked bullet list of markdown links to the arXiv sources, each with a 1-line note.\n\n4) **## Limits & Unknowns**\n   - What remains uncertain, caveats, or limits of the current evidence.\n\n- If no relevant arXiv results are found, say so in the Executive Summary and ask a clarifying question.",
       tools: {
         webSearch: webSearch({
           numResults: 10,
@@ -189,7 +282,7 @@ export async function POST(req: Request) {
         }),
       },
       stopWhen: stepCountIs(2),
-      prompt: `Question:\n${refinedQuestion}\n\nDo:\n1) Call webSearch with query: site:arxiv.org ${refinedQuestion}\n2) Read the results and write the response.`,
+      messages: synthesisMessages,
     });
 
     return streamResult.toUIMessageStreamResponse({
@@ -218,10 +311,24 @@ export async function POST(req: Request) {
           resources,
           generatedAt: new Date().toISOString(),
         };
+        await convex.mutation(api.chat.appendMessage, {
+          threadId,
+          role: "assistant",
+          text: reportMd,
+          runId,
+          jobId,
+          parts:
+            responseMessage && typeof responseMessage === "object"
+              ? (responseMessage as { parts?: unknown }).parts
+              : undefined,
+        });
         await convex.mutation(api.artifacts.upsertReport, {
           jobId,
           reportJson,
           reportMd,
+        });
+        await convex.mutation(api.chat.touchSession, {
+          threadId,
         });
         await convex.mutation(api.jobs.appendEvent, {
           jobId,

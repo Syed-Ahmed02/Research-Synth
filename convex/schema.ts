@@ -70,6 +70,29 @@ export default defineSchema({
     .index("by_ownerId_createdAt", ["ownerId", "createdAt"])
     .index("by_threadId_createdAt", ["threadId", "createdAt"]),
 
+  chatSessions: defineTable({
+    threadId: v.string(),
+    title: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    lastMessageAt: v.number(),
+  })
+    .index("by_threadId", ["threadId"])
+    .index("by_lastMessageAt", ["lastMessageAt"]),
+
+  chatMessages: defineTable({
+    sessionId: v.id("chatSessions"),
+    threadId: v.string(),
+    role: v.union(v.literal("user"), v.literal("assistant"), v.literal("system"), v.literal("tool")),
+    parts: v.optional(v.any()),
+    text: v.string(),
+    createdAt: v.number(),
+    runId: v.optional(v.string()),
+    jobId: v.optional(v.id("researchJobs")),
+  })
+    .index("by_sessionId_createdAt", ["sessionId", "createdAt"])
+    .index("by_threadId_createdAt", ["threadId", "createdAt"]),
+
   jobEvents: defineTable({
     jobId: v.id("researchJobs"),
     threadId: v.optional(v.string()),
