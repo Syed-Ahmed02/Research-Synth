@@ -62,22 +62,6 @@ type TimelineItem =
     }
   | {
       key: string;
-      kind: "status";
-      sort: number;
-      status: string;
-      stage: string;
-      question: string;
-    }
-  | {
-      key: string;
-      kind: "event";
-      sort: number;
-      stage: string;
-      level: string;
-      message: string;
-    }
-  | {
-      key: string;
       kind: "report";
       sort: number;
       reportMd: string;
@@ -85,6 +69,14 @@ type TimelineItem =
 
 const THREAD_STORAGE_KEY = "research-synthesizer:thread-id";
 const ALL_SOURCES: SourceType[] = ["wikipedia", "arxiv", "news", "gov", "web"];
+const STAGE_LABELS: Record<string, string> = {
+  cross_validate: "Cross-validating",
+  critique: "Critiquing",
+  extract: "Extracting",
+  gather: "Gathering",
+  plan: "Planning",
+  synthesize: "Synthesizing",
+};
 
 const textFromParts = (message: unknown) => {
   if (!message || typeof message !== "object") {
@@ -130,14 +122,6 @@ const timestampFromUnknown = (value: unknown) => {
   return undefined;
 };
 
-const formatTimestamp = (ts: number) =>
-  new Intl.DateTimeFormat(undefined, {
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    month: "short",
-  }).format(new Date(ts));
-
 export function ResearchChat() {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [config, setConfig] = useState<ChatConfig>(defaultConfig);
@@ -159,14 +143,36 @@ export function ResearchChat() {
 
   const jobs = useQuery(api.jobs.listJobs, threadId ? { threadId, limit: 20 } : "skip");
   const job = jobs?.[0];
-  const events = useQuery(
-    api.jobs.listJobEvents,
-    job ? { jobId: job._id, limit: 120 } : "skip",
-  );
   const report = useQuery(
     api.artifacts.getReportByJob,
     job ? { jobId: job._id } : "skip",
   );
+
+  const stageLabel = useMemo(() => {
+    if (!job?.currentStage) {
+      return null;
+    }
+    return STAGE_LABELS[job.currentStage] ?? job.currentStage;
+  }, [job?.currentStage]);
+
+  const liveStatusText = useMemo(() => {
+    if (job?.status === "running") {
+      return stageLabel ? `${stageLabel}...` : "Thinking...";
+    }
+    if (job?.status === "queued") {
+      return "Queued...";
+    }
+    if (job?.status === "succeeded") {
+      return "Complete";
+    }
+    if (job?.status === "failed") {
+      return "Failed";
+    }
+    if (status === "submitted" || status === "streaming") {
+      return "Thinking...";
+    }
+    return "Ready";
+  }, [job?.status, stageLabel, status]);
 
   const toggleSource = useCallback((source: SourceType) => {
     setConfig((prev) => {
@@ -196,28 +202,6 @@ export function ResearchChat() {
       };
     });
 
-    const statusItem: TimelineItem[] = job
-      ? [
-          {
-            key: `job-status-${job._id}`,
-            kind: "status",
-            sort: job.startedAt ?? job.createdAt,
-            stage: job.currentStage,
-            status: job.status,
-            question: job.question,
-          },
-        ]
-      : [];
-
-    const eventItems: TimelineItem[] = (events ?? []).map((event) => ({
-      key: `event-${event._id}`,
-      kind: "event",
-      sort: event.ts,
-      stage: event.stage,
-      level: event.level,
-      message: event.message,
-    }));
-
     const reportItem: TimelineItem[] =
       report?.reportMd && report.reportMd.trim()
         ? [
@@ -230,10 +214,10 @@ export function ResearchChat() {
           ]
         : [];
 
-    return [...chatItems, ...statusItem, ...eventItems, ...reportItem].sort(
+    return [...chatItems, ...reportItem].sort(
       (a, b) => a.sort - b.sort,
     );
-  }, [events, job, messages, report, sessionBaseTs]);
+  }, [job?.createdAt, messages, report, sessionBaseTs]);
 
   const exportMarkdown = useCallback(() => {
     const markdown = timeline
@@ -241,12 +225,6 @@ export function ResearchChat() {
         if (item.kind === "chat") {
           const label = item.role === "user" ? "User" : "Assistant";
           return `### ${label}\n\n${item.text}`;
-        }
-        if (item.kind === "status") {
-          return `### Run Status\n\n- Status: \`${item.status}\`\n- Stage: \`${item.stage}\`\n- Question: ${item.question}`;
-        }
-        if (item.kind === "event") {
-          return `### Stage Event\n\n- Stage: \`${item.stage}\`\n- Level: \`${item.level}\`\n- Message: ${item.message}`;
         }
         return `### Durable Report\n\n${item.reportMd}`;
       })
@@ -266,8 +244,8 @@ export function ResearchChat() {
   const exportJson = useCallback(() => {
     const payload = {
       config,
-      events: events ?? [],
       job: job ?? null,
+      liveStatusText,
       report: report ?? null,
       threadId,
       timeline,
@@ -283,7 +261,7 @@ export function ResearchChat() {
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);
-  }, [config, events, job, report, threadId, timeline]);
+  }, [config, job, liveStatusText, report, threadId, timeline]);
 
   const handleSubmit = useCallback(
     async ({ text }: { text: string }) => {
@@ -402,9 +380,26 @@ export function ResearchChat() {
 
       <Conversation className="h-[60vh] rounded-lg border">
         <ConversationContent className="gap-4 p-4">
+          <div className="sticky top-0 z-10 -mx-1 flex items-center justify-between rounded-md border bg-background/90 px-3 py-2 text-xs backdrop-blur">
+            <span className="text-zinc-500">Research status</span>
+            <span
+              className={cn(
+                "rounded-full border px-2 py-1 font-medium",
+                liveStatusText === "Complete" &&
+                  "border-emerald-400 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                liveStatusText === "Failed" &&
+                  "border-red-400 bg-red-500/10 text-red-700 dark:text-red-300",
+                (liveStatusText.endsWith("...") || liveStatusText === "Ready") &&
+                  "border-blue-400 bg-blue-500/10 text-blue-700 dark:text-blue-300",
+              )}
+            >
+              {liveStatusText}
+            </span>
+          </div>
+
           {timeline.length === 0 ? (
             <ConversationEmptyState
-              description="Ask a question to start a run. Stage updates and report markdown will appear in this same chat."
+              description="Ask a question to start a run. You will see one live status badge update as stages progress."
               title="Start your first research thread"
             />
           ) : null}
@@ -420,44 +415,6 @@ export function ResearchChat() {
                     ) : (
                       <p className="whitespace-pre-wrap">{item.text}</p>
                     )}
-                  </MessageContent>
-                </Message>
-              );
-            }
-
-            if (item.kind === "status") {
-              return (
-                <Message from="assistant" key={item.key}>
-                  <MessageContent className="rounded-md border border-blue-500/30 bg-blue-500/5 p-3">
-                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-300">
-                      Run State
-                    </p>
-                    <p className="text-sm">
-                      <span className="font-medium">Status:</span> {item.status} ·{" "}
-                      <span className="font-medium">Stage:</span> {item.stage}
-                    </p>
-                    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
-                      {item.question}
-                    </p>
-                    <p className="mt-2 text-xs text-zinc-500">
-                      {formatTimestamp(item.sort)}
-                    </p>
-                  </MessageContent>
-                </Message>
-              );
-            }
-
-            if (item.kind === "event") {
-              return (
-                <Message from="assistant" key={item.key}>
-                  <MessageContent className="rounded-md border p-3">
-                    <p className="mb-1 text-xs font-medium uppercase text-zinc-500">
-                      {item.stage} · {item.level}
-                    </p>
-                    <MessageResponse>{item.message}</MessageResponse>
-                    <p className="mt-2 text-xs text-zinc-500">
-                      {formatTimestamp(item.sort)}
-                    </p>
                   </MessageContent>
                 </Message>
               );
@@ -484,11 +441,7 @@ export function ResearchChat() {
         <PromptInputFooter>
           <PromptInputTools>
             <p className="px-2 text-xs text-zinc-500">
-              {status === "ready"
-                ? "Ready"
-                : status === "error"
-                  ? "Error"
-                  : "Running..."}
+              {liveStatusText}
             </p>
           </PromptInputTools>
           <PromptInputSubmit onStop={stop} status={status} />
