@@ -1,10 +1,14 @@
 # Research Synthesizer
 
-A **chat-first** research app that turns your questions into synthesized answers with real citations. You ask in natural language; the app plans, gathers sources, extracts claims, and streams a structured report—all in one conversation, with durable state and no invented sources.
+**Overview.** Chat-first app: you ask a research question; the system (optionally) clarifies, then runs a multi-stage pipeline (plan → gather → extract → critique → cross-validate → synthesize) using live search and LLMs. Answers are grounded in retrieved evidence and streamed into one timeline. Convex stores sessions, messages, jobs, and artifacts; the UI subscribes for real-time updates and shows the final report with linked sources. Citation guardrails keep synthesis tied to the evidence packet.
 
 ---
 
 ## The Big Idea
+
+A **chat-first** research app that turns your questions into synthesized answers with real citations. You ask in natural language; the app plans, gathers sources, extracts claims, and streams a structured report—all in one conversation, with durable state and no invented sources.
+
+---
 
 - **One unified chat**: Prompts, live status, streaming synthesis, and the final report all live in a single timeline. No separate “run” screens—you stay in the conversation.
 - **Multi-stage agents**: Under the hood, a fixed pipeline of stages (plan → gather → extract → critique → cross-validate → synthesize) runs so that answers are grounded in retrieved evidence and citations are traceable.
@@ -12,6 +16,27 @@ A **chat-first** research app that turns your questions into synthesized answers
 - **Citation guardrails**: Synthesis is constrained to the evidence packet; the UI surfaces sources and report together so you can see where each claim comes from.
 
 **Note:** We wanted to add a **Chroma vector store** for semantic search over an existing database of documents (so retrieval could run against pre-indexed content as well as live search), but didn’t get enough time to fully integrate it. The codebase has Convex schema and wiring for passages/embeddings and a Chroma provider in `lib/vector/providers/chroma.ts`; that path can be picked up later.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+  User[User] --> Chat[Chat UI]
+  Chat --> Clarify{Clarify?}
+  Clarify -->|yes| Chat
+  Clarify -->|no| Collect[Data collection]
+  Collect -->|fetch| Sources[Wikipedia, arXiv, web...]
+  Collect -->|persist| Store[(Convex)]
+  Store -->|read| Retrieve[Retrieval]
+  Retrieve -->|evidence, passages| Synth[Synthesis]
+  Synth -->|stream| Chat
+  Synth -->|save report| Store
+  Store <-->|subscribe| Chat
+```
+
+**High-level flow:** The user asks a question in chat. After optional clarification, the system **collects** data from external sources (e.g. Wikipedia, arXiv, web via Exa) and persists it in Convex. **Retrieval** uses that stored content (and, when wired, semantic search) to get evidence and passages. Synthesis consumes the retrieved evidence and streams the report to the UI while writing the final report back to Convex; the UI subscribes to Convex so the timeline stays in sync.
 
 ---
 
