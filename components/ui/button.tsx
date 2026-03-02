@@ -2,6 +2,7 @@
 
 import { Button as ButtonPrimitive } from "@base-ui/react/button"
 import { cva, type VariantProps } from "class-variance-authority"
+import { forwardRef } from "react"
 
 import { cn } from "@/lib/utils"
 
@@ -40,19 +41,19 @@ const buttonVariants = cva(
   }
 )
 
-function Button({
-  className,
-  variant = "default",
-  size = "default",
-  ...props
-}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
-  return (
-    <ButtonPrimitive
-      data-slot="button"
-      className={cn(buttonVariants({ variant, size, className }))}
-      {...props}
-    />
-  )
-}
+const Button = forwardRef<
+  HTMLButtonElement,
+  VariantProps<typeof buttonVariants> & Record<string, any>
+>(({ className, variant = "default", size = "default", ...props }, ref) => (
+  <ButtonPrimitive
+    nativeButton
+    data-slot="button"
+    className={cn(buttonVariants({ variant, size, className }))}
+    ref={ref as any}
+    {...props}
+  />
+))
+
+Button.displayName = "Button"
 
 export { Button, buttonVariants }
