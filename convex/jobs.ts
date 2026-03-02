@@ -24,6 +24,10 @@ export const createJob = mutation({
   args: {
     question: v.string(),
     ownerId: v.optional(v.string()),
+    threadId: v.optional(v.string()),
+    promptMessageId: v.optional(v.string()),
+    assistantMessageId: v.optional(v.string()),
+    runId: v.optional(v.string()),
     config: v.object({
       depthPreset: v.union(v.literal("fast"), v.literal("standard"), v.literal("deep")),
       sourcesEnabled: v.array(sourceTypeValidator),
@@ -39,6 +43,10 @@ export const createJob = mutation({
     const createdAt = now();
     const jobId = await ctx.db.insert("researchJobs", {
       question: args.question,
+      threadId: args.threadId,
+      promptMessageId: args.promptMessageId,
+      assistantMessageId: args.assistantMessageId,
+      runId: args.runId,
       status: "queued",
       currentStage: "plan",
       config: args.config,
@@ -48,6 +56,8 @@ export const createJob = mutation({
 
     await ctx.db.insert("jobEvents", {
       jobId,
+      threadId: args.threadId,
+      runId: args.runId,
       ts: createdAt,
       stage: "plan",
       level: "info",
@@ -80,6 +90,10 @@ export const setJobStatus = mutation({
   },
   handler: async (ctx, args) => {
     const ts = now();
+    const job = await ctx.db.get(args.jobId);
+    if (!job) {
+      throw new Error("Job not found.");
+    }
     await ctx.db.patch(args.jobId, {
       status: args.status,
       currentStage: args.currentStage,
@@ -92,6 +106,8 @@ export const setJobStatus = mutation({
 
     await ctx.db.insert("jobEvents", {
       jobId: args.jobId,
+      threadId: job.threadId,
+      runId: job.runId,
       ts,
       stage: args.currentStage,
       level: args.status === "failed" ? "error" : "info",
@@ -104,6 +120,8 @@ export const setJobStatus = mutation({
 export const appendEvent = mutation({
   args: {
     jobId: v.id("researchJobs"),
+    threadId: v.optional(v.string()),
+    runId: v.optional(v.string()),
     stage: stageValidator,
     level: v.union(v.literal("debug"), v.literal("info"), v.literal("warn"), v.literal("error")),
     message: v.string(),
@@ -111,8 +129,14 @@ export const appendEvent = mutation({
     ts: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId);
+    if (!job) {
+      throw new Error("Job not found.");
+    }
     return await ctx.db.insert("jobEvents", {
       jobId: args.jobId,
+      threadId: args.threadId ?? job.threadId,
+      runId: args.runId ?? job.runId,
       ts: args.ts ?? now(),
       stage: args.stage,
       level: args.level,
@@ -131,6 +155,7 @@ export const getJob = query({
 
 export const listJobs = query({
   args: {
+    threadId: v.optional(v.string()),
     status: v.optional(
       v.union(
         v.literal("queued"),
@@ -145,6 +170,13 @@ export const listJobs = query({
   },
   handler: async (ctx, args) => {
     const limit = args.limit ?? 50;
+    if (args.threadId) {
+      return await ctx.db
+        .query("researchJobs")
+        .withIndex("by_threadId_createdAt", (q) => q.eq("threadId", args.threadId!))
+        .order("desc")
+        .take(limit);
+    }
     if (args.ownerId) {
       return await ctx.db
         .query("researchJobs")
@@ -183,5 +215,19 @@ export const listJobEvents = query({
       .withIndex("by_jobId_ts", (q) => q.eq("jobId", args.jobId))
       .order("asc")
       .take(limit);
+  },
+});
+
+export const listThreadEvents = query({
+  args: {
+    threadId: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("jobEvents")
+      .withIndex("by_threadId_ts", (q) => q.eq("threadId", args.threadId))
+      .order("asc")
+      .take(args.limit ?? 500);
   },
 });

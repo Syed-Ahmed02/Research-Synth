@@ -1,4 +1,4 @@
-import { CloudClient } from "chromadb";
+import { ChromaClient, CloudClient } from "chromadb";
 import type { Collection } from "chromadb";
 import type {
   PassageVectorRecord,
@@ -9,9 +9,10 @@ import type {
 } from "../types";
 
 type ChromaConfig = {
-  apiKey: string;
-  tenant: string;
-  database: string;
+  url?: string;
+  apiKey?: string;
+  tenant?: string;
+  database?: string;
   collection: string;
 };
 
@@ -69,11 +70,21 @@ const fromChromaMetadata = (metadata: Record<string, unknown>): VectorMetadata |
 };
 
 export const createChromaProvider = (config: ChromaConfig): VectorAdapter => {
-  const client = new CloudClient({
-    apiKey: config.apiKey,
-    tenant: config.tenant,
-    database: config.database,
-  });
+  const client =
+    config.url && config.url.trim().length > 0
+      ? new ChromaClient({ path: config.url })
+      : (() => {
+          if (!config.apiKey || !config.tenant || !config.database) {
+            throw new Error(
+              "Chroma cloud mode requires CHROMA_API_KEY, CHROMA_TENANT, and CHROMA_DATABASE",
+            );
+          }
+          return new CloudClient({
+            apiKey: config.apiKey,
+            tenant: config.tenant,
+            database: config.database,
+          });
+        })();
 
   const collectionCache = new Map<string, Promise<Collection>>();
 
@@ -150,7 +161,7 @@ export const createChromaProvider = (config: ChromaConfig): VectorAdapter => {
         .filter((row): row is VectorQueryHit => row !== null);
     },
 
-    async deleteNamespace(args: { namespace: string }) {
+    async deleteNamespace(args: { jobId: string; namespace: string }) {
       const collectionName = normalizeCollectionName(`${config.collection}_${args.namespace}`);
       await client.deleteCollection({ name: collectionName });
       collectionCache.delete(collectionName);

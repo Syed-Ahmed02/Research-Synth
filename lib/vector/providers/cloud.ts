@@ -107,7 +107,7 @@ export const createCloudProvider = (config: CloudConfig): VectorAdapter => {
       return parseHits(data);
     },
 
-    async deleteNamespace(args: { namespace: string }) {
+    async deleteNamespace(args: { jobId: string; namespace: string }) {
       const response = await fetch(`${config.baseUrl}/indexes/${config.index}/delete`, {
         method: "POST",
         headers: headersForCloud(config.apiKey),

@@ -31,6 +31,10 @@ const locatorValidator = v.object({
 export default defineSchema({
   researchJobs: defineTable({
     question: v.string(),
+    threadId: v.optional(v.string()),
+    promptMessageId: v.optional(v.string()),
+    assistantMessageId: v.optional(v.string()),
+    runId: v.optional(v.string()),
     status: v.union(
       v.literal("queued"),
       v.literal("running"),
@@ -63,10 +67,13 @@ export default defineSchema({
   })
     .index("by_status", ["status"])
     .index("by_createdAt", ["createdAt"])
-    .index("by_ownerId_createdAt", ["ownerId", "createdAt"]),
+    .index("by_ownerId_createdAt", ["ownerId", "createdAt"])
+    .index("by_threadId_createdAt", ["threadId", "createdAt"]),
 
   jobEvents: defineTable({
     jobId: v.id("researchJobs"),
+    threadId: v.optional(v.string()),
+    runId: v.optional(v.string()),
     ts: v.number(),
     stage: stageValidator,
     level: v.union(
@@ -79,7 +86,8 @@ export default defineSchema({
     payload: v.optional(v.any()),
   })
     .index("by_jobId_ts", ["jobId", "ts"])
-    .index("by_jobId_stage_ts", ["jobId", "stage", "ts"]),
+    .index("by_jobId_stage_ts", ["jobId", "stage", "ts"])
+    .index("by_threadId_ts", ["threadId", "ts"]),
 
   documents: defineTable({
     jobId: v.id("researchJobs"),

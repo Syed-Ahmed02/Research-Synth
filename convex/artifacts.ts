@@ -204,6 +204,18 @@ export const createCitation = mutation({
     if (!args.quote.trim()) {
       throw new Error("Citation quote must be non-empty.");
     }
+
+    const document = await ctx.db.get(args.documentId);
+    if (!document) {
+      throw new Error("Citation document not found.");
+    }
+    if (document.jobId !== args.jobId) {
+      throw new Error("Citation document does not belong to the provided job.");
+    }
+    if (document.url !== args.url) {
+      throw new Error("Citation URL must match the parent document URL.");
+    }
+
     return await ctx.db.insert("citations", {
       ...args,
       createdAt: now(),
